@@ -1,15 +1,34 @@
 # sso-jwt
 
-A Rust CLI for obtaining SSO JWTs with hardware-backed secure caching.
+A Rust toolkit for obtaining SSO JWTs with hardware-backed secure caching.
 
-Replaces the Node.js `ssojwt` tool with a fast, single-binary alternative that encrypts cached tokens using the Secure Enclave (macOS), TPM 2.0 (Windows), or a software keyring (Linux). Tokens never touch disk as plaintext and are never exported into long-lived shell environment variables.
+Replaces the Node.js `ssojwt` tool with a fast, native alternative that encrypts cached tokens using the Secure Enclave (macOS), TPM 2.0 (Windows), or a software keyring (Linux). Tokens never touch disk as plaintext and are never exported into long-lived shell environment variables.
+
+## Workspace
+
+This repository is a Cargo workspace containing four crates:
+
+| Crate | Type | Description |
+|---|---|---|
+| [`sso-jwt`](sso-jwt/) | Binary | CLI tool for obtaining JWTs |
+| [`sso-jwt-lib`](sso-jwt-lib/) | Library | Core logic: caching, OAuth, secure storage, JWT parsing |
+| [`sso-jwt-napi`](sso-jwt-napi/) | cdylib | Node.js native addon via napi-rs (drop-in replacement for `sso-jwt-legacy`) |
+| [`sso-jwt-tpm-bridge`](sso-jwt-tpm-bridge/) | Binary | Windows TPM bridge for WSL environments |
 
 ## Installation
 
-### From source
+### CLI from source
 
 ```bash
 cargo install --path sso-jwt
+```
+
+### Node.js native addon
+
+```bash
+cd sso-jwt-napi
+npm install
+npm run build
 ```
 
 ### Homebrew (planned)
@@ -37,7 +56,7 @@ On first run, `sso-jwt` will:
 2. Open your browser for Okta authentication via the OAuth Device Code flow.
 3. Encrypt and cache the resulting JWT.
 
-Subsequent runs return the cached token instantly (no browser, no network) until it approaches expiration, at which point it's proactively refreshed via the SSO heartbeat endpoint.
+Subsequent runs return the cached token instantly until it approaches expiration, at which point it's proactively refreshed via the SSO heartbeat endpoint.
 
 ## Usage
 
@@ -83,6 +102,22 @@ COMPANY_JWT=$(sso-jwt -c dev -e dev) terraform plan
 sso-jwt --clear
 ```
 
+### Node.js Library Usage
+
+The napi binding is a drop-in replacement for `sso-jwt-legacy`:
+
+```javascript
+// Old (Node.js)
+const { getJwt } = require('sso-jwt-legacy');
+
+// New (Rust via napi-rs) -- identical API
+const { getJwt } = require('sso-jwt');
+
+const jwt = await getJwt({ env: 'prod', cacheName: 'default' });
+```
+
+See [`sso-jwt-napi/README.md`](sso-jwt-napi/) for details.
+
 ## Configuration
 
 Configuration file at `$XDG_CONFIG_HOME/sso-jwt/config.toml` (default: `~/.config/sso-jwt/config.toml`):
@@ -119,7 +154,7 @@ env_var = "COMPANY_JWT"
 
 ## Shell Integration
 
-Add to your shell profile to get best-effort detection of accidental `export` usage:
+Add to your shell profile for best-effort detection of accidental `export` usage:
 
 ```bash
 # ~/.zshrc
@@ -132,15 +167,7 @@ eval "$(sso-jwt shell-init bash)"
 sso-jwt shell-init fish | source
 ```
 
-When installed, attempting `export COMPANY_JWT=$(sso-jwt)` will produce an error:
-
-```
-error: refusing to output JWT for 'export'. This would persist the token in your shell environment.
-       Use: COMPANY_JWT=$(sso-jwt) your-command
-       Or:  sso-jwt exec -- your-command
-```
-
-This is a best-effort guardrail using shell-specific hooks (zsh `preexec`, bash `DEBUG` trap). It catches common interactive misuse but is not bulletproof against indirect invocations or scripts.
+This is a guardrail, not a guarantee -- it catches common interactive misuse but indirect invocations may bypass it.
 
 ## Token Lifecycle
 
@@ -166,96 +193,86 @@ Tokens go through four lifecycle states based on age relative to the risk-level 
 | 2 (medium) | 12 hours | last 1 hour | 24 hours |
 | 3 (high) | 1 hour | last 10 minutes | 8 hours |
 
-The absolute session timeout prevents indefinite refresh chains. After the session timeout, a full browser-based re-authentication is required regardless of the current token's age.
+The absolute session timeout prevents indefinite refresh chains.
 
 ## Platform Security
 
 ### macOS (Secure Enclave)
 
-Requires T2 chip (2018+ Intel Macs) or Apple Silicon. The encryption key is a P-256 EC key pair generated inside the Secure Enclave. Encryption uses ECIES (cofactor X9.63 SHA-256 AES-GCM). The private key never leaves the hardware.
-
-With `--biometric`, Touch ID is required for every cache read. Without it, the key is accessible whenever the device is unlocked.
+Requires T2 chip (2018+ Intel Macs) or Apple Silicon. P-256 EC key pair generated inside the Secure Enclave. Encryption uses ECIES (cofactor X9.63 SHA-256 AES-GCM). The private key never leaves the hardware.
 
 ### Windows (TPM 2.0)
 
-Requires TPM 2.0 module. The encryption key is created via the Microsoft Platform Crypto Provider (CNG). Key material is hardware-resident and non-exportable.
-
-With `--biometric`, Windows Hello is required via `NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG`.
+Requires TPM 2.0 module. Key created via the Microsoft Platform Crypto Provider (CNG). Key material is hardware-resident and non-exportable.
 
 ### WSL
 
-WSL is auto-detected. A bridge process (`sso-jwt-tpm-bridge.exe`) on the Windows host performs TPM operations. The Linux binary communicates with it via JSON-RPC over stdin/stdout pipes.
-
-Requires `sso-jwt` to be installed on the Windows host first.
+Auto-detected. A bridge process (`sso-jwt-tpm-bridge.exe`) on the Windows host performs TPM operations via JSON-RPC over stdin/stdout pipes.
 
 ### Linux
 
-Uses the D-Bus Secret Service API (GNOME Keyring / KDE Wallet). This is software-only -- no hardware binding -- but still encrypts the cache with the user's login keyring.
-
-## Cache Format
-
-Cached tokens are stored at `$XDG_CONFIG_HOME/sso-jwt/<cache-name>.enc` as a binary file:
-
-| Bytes | Field |
-|---|---|
-| 0-3 | Magic: `SJWT` |
-| 4 | Format version (0x01) |
-| 5 | Risk level |
-| 6-13 | Token issued-at (u64 BE) |
-| 14-21 | Session start (u64 BE) |
-| 22-25 | Ciphertext length (u32 BE) |
-| 26-N | ECIES ciphertext blob |
-
-The header is readable without decryption, allowing expiration checks without touching the Secure Enclave / TPM.
+Uses the D-Bus Secret Service API (GNOME Keyring / KDE Wallet). Software-only -- no hardware binding.
 
 ## Compatibility
 
-The new CLI talks to the same webservice as the existing Node.js `ssojwt` tool. No server-side changes are needed. The OAuth Device Code flow, client ID, and API endpoints are identical.
-
-The existing plaintext cache at `~/.cache/sso-jwt/` is not read or migrated. First run with the new tool requires a fresh authentication.
+Talks to the same webservice as the existing Node.js `ssojwt` tool. No server-side changes needed. The OAuth Device Code flow, client ID, and API endpoints are identical.
 
 ## Development
 
 ```bash
-# Build
+# Build all crates
 cargo build
 
-# Run tests
+# Run all tests (155 tests)
 cargo test
 
-# Lint
-cargo clippy
+# Lint (strict rules enforced via workspace lints)
+cargo clippy -- -D warnings
 
 # Release build
 cargo build --release
+
+# Build Node.js addon
+cd sso-jwt-napi && npm install && npm run build
 ```
 
 ### Project Structure
 
 ```
 sso-jwt-rs/
-  sso-jwt/                     Main CLI binary
+  sso-jwt-lib/                  Core library (reusable)
     src/
-      main.rs                  Entry point
-      cli.rs                   Clap CLI definition and dispatch
-      config.rs                Config file + env var loading
-      oauth.rs                 OAuth Device Code flow
-      cache.rs                 Cache format, token lifecycle, proactive refresh
-      jwt.rs                   JWT parsing (base64 decode, iat extraction)
-      shell_init.rs            Shell integration script generation
-      exec.rs                  Fork/exec with JWT env injection
+      lib.rs                    Public API: get_jwt(), GetJwtOptions
+      jwt.rs                    JWT parsing (base64 decode, iat extraction)
+      config.rs                 Config file + env var loading
+      cache.rs                  Cache format, token lifecycle, proactive refresh
+      oauth.rs                  OAuth Device Code flow + heartbeat refresh
       secure_storage/
-        mod.rs                 SecureStorage trait + platform dispatch
-        macos.rs               Secure Enclave via Security.framework
-        windows.rs             TPM 2.0 via CNG
-        wsl.rs                 WSL TPM bridge client
-        linux.rs               D-Bus secret service keyring
-    tests/
-      integration.rs           CLI integration tests
-  sso-jwt-tpm-bridge/          Windows-only TPM bridge binary
+        mod.rs                  SecureStorage trait + platform dispatch
+        macos.rs                Secure Enclave via Security.framework
+        windows.rs              TPM 2.0 via CNG
+        wsl.rs                  WSL TPM bridge client
+        linux.rs                D-Bus secret service keyring
+
+  sso-jwt/                      CLI binary
     src/
-      main.rs                  JSON-RPC server over stdin/stdout
-      tpm.rs                   TPM 2.0 operations via CNG
+      main.rs                   Entry point
+      cli.rs                    Clap CLI definition and dispatch
+      shell_init.rs             Shell integration script generation
+      exec.rs                   Fork/exec with JWT env injection
+    tests/
+      integration.rs            CLI integration tests
+
+  sso-jwt-napi/                 Node.js native addon
+    src/lib.rs                  napi-rs binding
+    index.js                    Native module loader
+    index.d.ts                  TypeScript definitions
+    package.json                npm package config
+
+  sso-jwt-tpm-bridge/           Windows TPM bridge for WSL
+    src/
+      main.rs                   JSON-RPC server over stdin/stdout
+      tpm.rs                    TPM 2.0 operations via CNG
 ```
 
 ## License
