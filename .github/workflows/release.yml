@@ -101,50 +101,29 @@ jobs:
           name: sso-jwt-x86_64-pc-windows-msvc.zip
           path: .
 
-      - name: Extract binaries
+      - uses: actions/download-artifact@v5
+        with:
+          name: sso-jwt-x86_64-unknown-linux-gnu.tar.gz
+          path: .
+
+      - name: Prepare dist directory
         shell: pwsh
-        run: Expand-Archive -Path sso-jwt-x86_64-pc-windows-msvc.zip -DestinationPath binaries
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Expand-Archive -Path sso-jwt-x86_64-pc-windows-msvc.zip -DestinationPath dist
+          # Extract Linux binary for WSL installation
+          tar xzf sso-jwt-x86_64-unknown-linux-gnu.tar.gz -C dist
+          Rename-Item -Path dist/sso-jwt -NewName sso-jwt-linux -ErrorAction SilentlyContinue
+          # Ensure correct names
+          Get-ChildItem dist/
 
       - name: Install WiX
         shell: pwsh
         run: dotnet tool install --global wix
 
-      - name: Create WiX source
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          @"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-            <Package Name="sso-jwt"
-                     Manufacturer="sso-jwt contributors"
-                     Version="$version"
-                     UpgradeCode="D7E3F4A1-8B2C-4D5E-9F6A-1B2C3D4E5F6A">
-
-              <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
-              <MediaTemplate EmbedCab="yes" />
-
-              <StandardDirectory Id="ProgramFiles64Folder">
-                <Directory Id="INSTALLFOLDER" Name="sso-jwt">
-                  <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
-                    <File Source="binaries\sso-jwt.exe" />
-                    <File Source="binaries\sso-jwt-tpm-bridge.exe" />
-                    <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
-                  </Component>
-                </Directory>
-              </StandardDirectory>
-
-              <Feature Id="ProductFeature" Title="sso-jwt">
-                <ComponentRef Id="MainExecutable" />
-              </Feature>
-            </Package>
-          </Wix>
-          "@ | Out-File -FilePath sso-jwt.wxs -Encoding UTF8
-
       - name: Build MSI
         shell: pwsh
-        run: |
-          wix build sso-jwt.wxs -o sso-jwt-x86_64-windows.msi
+        run: wix build installer/sso-jwt.wxs -o sso-jwt-x86_64-windows.msi
 
       - uses: actions/upload-artifact@v5
         with:

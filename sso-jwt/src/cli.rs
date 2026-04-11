@@ -69,16 +69,31 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+
+    /// Install sso-jwt (configure shell integration; on Windows, also install into WSL distros)
+    Install,
+
+    /// Uninstall sso-jwt configuration (on Windows, also remove from WSL distros)
+    Uninstall,
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn run(cli: Cli) -> Result<()> {
-    // Handle shell-init early -- no config loading needed
-    if let Some(Commands::ShellInit { shell }) = &cli.command {
-        let detected = shell_init::detect_shell();
-        let shell_name = shell.as_deref().unwrap_or(&detected);
-        print!("{}", shell_init::generate(shell_name));
-        return Ok(());
+    // Handle subcommands that don't need config
+    match &cli.command {
+        Some(Commands::ShellInit { shell }) => {
+            let detected = shell_init::detect_shell();
+            let shell_name = shell.as_deref().unwrap_or(&detected);
+            print!("{}", shell_init::generate(shell_name));
+            return Ok(());
+        }
+        Some(Commands::Install) => {
+            return run_install();
+        }
+        Some(Commands::Uninstall) => {
+            return run_uninstall();
+        }
+        _ => {}
     }
 
     // Load config and apply CLI overrides
@@ -89,9 +104,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Exec { ref command }) => {
             let jwt = resolve_token(&config)?;
             exec::run(&config.env_var, &jwt, command)
-        }
-        Some(Commands::ShellInit { .. }) => {
-            unreachable!() // handled above
         }
         None => {
             if config.clear {
@@ -104,7 +116,55 @@ pub fn run(cli: Cli) -> Result<()> {
             print!("{jwt}");
             Ok(())
         }
+        _ => unreachable!(),
     }
+}
+
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+fn run_install() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        eprintln!("Installing sso-jwt...");
+        crate::wsl_install::install_into_wsl_distros()?;
+        eprintln!("Done.");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = shell_init::detect_shell();
+        let rc_file = match shell.as_str() {
+            "zsh" => "~/.zshrc",
+            "fish" => "~/.config/fish/config.fish",
+            _ => "~/.bashrc",
+        };
+        eprintln!("Add to {rc_file}:");
+        eprintln!();
+        if shell == "fish" {
+            eprintln!("  sso-jwt shell-init fish | source");
+        } else {
+            eprintln!("  eval \"$(sso-jwt shell-init)\"");
+        }
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::print_stderr)]
+fn run_uninstall() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        eprintln!("Uninstalling sso-jwt...");
+        crate::wsl_install::uninstall_from_wsl_distros()?;
+        eprintln!("Done.");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!("Remove the sso-jwt shell-init line from your shell profile.");
+    }
+
+    Ok(())
 }
 
 fn apply_cli_overrides(config: &mut Config, cli: &Cli) {

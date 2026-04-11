@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package
+        Name="sso-jwt"
+        Manufacturer="sso-jwt contributors"
+        Version="!(bind.FileVersion.sso_jwt.exe)"
+        UpgradeCode="D7E3F4A1-8B2C-4D5E-9F6A-1B2C3D4E5F6A"
+        Scope="perUser">
+
+        <MajorUpgrade
+            DowngradeErrorMessage="A newer version of sso-jwt is already installed." />
+
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Install to %LocalAppData%\sso-jwt\bin -->
+        <StandardDirectory Id="LocalAppDataFolder">
+            <Directory Id="INSTALLFOLDER" Name="sso-jwt">
+                <Directory Id="BinFolder" Name="bin" />
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Files -->
+        <ComponentGroup Id="ProductComponents" Directory="BinFolder">
+            <Component Id="sso_jwt_exe">
+                <File Id="sso_jwt.exe" Source="dist\sso-jwt.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="tpm_bridge_exe">
+                <File Id="sso_jwt_tpm_bridge.exe" Source="dist\sso-jwt-tpm-bridge.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="linux_binary">
+                <File Id="sso_jwt_linux" Source="dist\sso-jwt-linux" KeyPath="yes" />
+            </Component>
+
+            <!-- Add to user PATH -->
+            <Component Id="PathEntry">
+                <Environment
+                    Id="PATH"
+                    Name="PATH"
+                    Value="[BinFolder]"
+                    Permanent="no"
+                    Part="last"
+                    Action="set"
+                    System="no" />
+                <RegistryValue
+                    Root="HKCU"
+                    Key="Software\sso-jwt"
+                    Name="PathSet"
+                    Type="integer"
+                    Value="1"
+                    KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <!-- Feature -->
+        <Feature Id="MainFeature" Title="sso-jwt">
+            <ComponentGroupRef Id="ProductComponents" />
+        </Feature>
+
+        <!-- Custom actions: install into WSL on install, clean up on uninstall -->
+        <CustomAction
+            Id="SsoJwtInstall"
+            FileRef="sso_jwt.exe"
+            ExeCommand="install"
+            Execute="deferred"
+            Impersonate="yes"
+            Return="ignore" />
+
+        <CustomAction
+            Id="SsoJwtUninstall"
+            FileRef="sso_jwt.exe"
+            ExeCommand="uninstall"
+            Execute="deferred"
+            Impersonate="yes"
+            Return="ignore" />
+
+        <InstallExecuteSequence>
+            <Custom Action="SsoJwtInstall" After="InstallFiles">
+                NOT REMOVE
+            </Custom>
+            <Custom Action="SsoJwtUninstall" Before="RemoveFiles">
+                REMOVE="ALL"
+            </Custom>
+        </InstallExecuteSequence>
+
+    </Package>
+</Wix>
