@@ -1,0 +1,130 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use crate::cache;
+use crate::config::Config;
+use crate::exec;
+use crate::secure_storage;
+use crate::shell_init;
+
+#[derive(Parser)]
+#[command(
+    name = "sso-jwt",
+    version,
+    about = "Obtain SSO JWTs with hardware-backed secure caching"
+)]
+pub struct Cli {
+    /// SSO environment
+    #[arg(
+        short,
+        long,
+        default_value = "prod",
+        value_parser = ["dev", "test", "ote", "prod"]
+    )]
+    pub environment: String,
+
+    /// Cache name (allows multiple concurrent caches)
+    #[arg(short, long, default_value = "default")]
+    pub cache_name: String,
+
+    /// Token risk level (1=low/24h, 2=medium/12h, 3=high/1h)
+    #[arg(
+        short,
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u8).range(1..=3)
+    )]
+    pub risk_level: u8,
+
+    /// Override OAuth service URL
+    #[arg(long)]
+    pub oauth_url: Option<String>,
+
+    /// Require biometric (Touch ID / Windows Hello) for each use
+    #[arg(long)]
+    pub biometric: bool,
+
+    /// Don't auto-open browser for authentication
+    #[arg(long)]
+    pub no_open: bool,
+
+    /// Clear cached token and exit
+    #[arg(long)]
+    pub clear: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Print shell integration script for export detection
+    ShellInit {
+        /// Shell type (auto-detected if omitted)
+        #[arg(value_parser = ["bash", "zsh", "fish"])]
+        shell: Option<String>,
+    },
+
+    /// Run a command with the JWT injected into its environment
+    Exec {
+        /// Command and arguments to run
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+}
+
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+pub fn run(cli: Cli) -> Result<()> {
+    // Handle shell-init early -- no config loading needed
+    if let Some(Commands::ShellInit { shell }) = &cli.command {
+        let detected = shell_init::detect_shell();
+        let shell_name = shell.as_deref().unwrap_or(&detected);
+        print!("{}", shell_init::generate(shell_name));
+        return Ok(());
+    }
+
+    // Load config and apply CLI overrides
+    let mut config = Config::load()?;
+    apply_cli_overrides(&mut config, &cli);
+
+    match cli.command {
+        Some(Commands::Exec { ref command }) => {
+            let jwt = resolve_token(&config)?;
+            exec::run(&config.env_var, &jwt, command)
+        }
+        Some(Commands::ShellInit { .. }) => {
+            unreachable!() // handled above
+        }
+        None => {
+            if config.clear {
+                cache::clear(&config)?;
+                eprintln!("Cache cleared.");
+                return Ok(());
+            }
+
+            let jwt = resolve_token(&config)?;
+            print!("{jwt}");
+            Ok(())
+        }
+    }
+}
+
+fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
+    config.environment = cli.environment.clone();
+    config.cache_name = cli.cache_name.clone();
+    config.risk_level = cli.risk_level;
+    config.no_open = cli.no_open;
+    config.clear = cli.clear;
+
+    if cli.biometric {
+        config.biometric = true;
+    }
+    if cli.oauth_url.is_some() {
+        config.oauth_url = cli.oauth_url.clone();
+    }
+}
+
+fn resolve_token(config: &Config) -> Result<String> {
+    let storage = secure_storage::platform_storage(config.biometric)?;
+    cache::resolve_token(config, storage.as_ref())
+}
