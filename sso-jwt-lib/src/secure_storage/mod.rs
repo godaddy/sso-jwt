@@ -25,6 +25,7 @@ pub trait SecureStorage: Send + Sync {
 mod macos;
 
 #[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
 mod windows;
 
 #[cfg(target_os = "linux")]

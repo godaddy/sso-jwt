@@ -101,7 +101,7 @@ impl WslTpmBridge {
         let mut buf_reader = reader;
         buf_reader.read_line(&mut response_line)?;
 
-        let _ = child.wait();
+        drop(child.wait());
 
         if response_line.is_empty() {
             // Try to read stderr for error info
@@ -109,7 +109,7 @@ impl WslTpmBridge {
             let mut err_msg = String::new();
             if let Some(mut stderr) = stderr {
                 use std::io::Read;
-                let _ = stderr.read_to_string(&mut err_msg);
+                drop(stderr.read_to_string(&mut err_msg));
             }
             return Err(anyhow!(
                 "TPM bridge returned empty response. stderr: {err_msg}"

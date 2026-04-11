@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 
 #[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
 mod tpm;
 
 #[derive(Deserialize)]

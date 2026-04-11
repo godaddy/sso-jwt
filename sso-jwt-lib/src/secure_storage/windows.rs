@@ -83,7 +83,7 @@ impl TpmStorage {
                         NCRYPT_UI_POLICY_PROPERTY,
                         std::slice::from_raw_parts(
                             &policy as *const _ as *const u8,
-                            std::mem::size_of::<NCRYPT_UI_POLICY>(),
+                            size_of::<NCRYPT_UI_POLICY>(),
                         ),
                         NCRYPT_PERSIST_FLAG,
                     );
