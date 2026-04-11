@@ -17,6 +17,7 @@ use std::io::{self, BufRead, Write};
     unsafe_code,
     clippy::ptr_as_ptr,
     clippy::unseparated_literal_suffix,
+    let_underscore_drop,
     trivial_casts,
     unused_must_use,
     unused_qualifications
