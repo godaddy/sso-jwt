@@ -17,9 +17,7 @@ impl KeyringStorage {
     #[allow(clippy::print_stderr)]
     pub fn init(biometric: bool) -> Result<Self> {
         if biometric {
-            eprintln!(
-                "warning: --biometric has no effect on Linux (no hardware security module)"
-            );
+            eprintln!("warning: --biometric has no effect on Linux (no hardware security module)");
         }
 
         // Print one-time notice about software-only storage

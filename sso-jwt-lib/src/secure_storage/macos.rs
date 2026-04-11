@@ -31,8 +31,7 @@ extern "C" {
     static kSecMatchLimitOne: core_foundation::string::CFStringRef;
     static kSecAttrKeyClass: core_foundation::string::CFStringRef;
     static kSecAttrKeyClassPrivate: core_foundation::string::CFStringRef;
-    static kSecAttrAccessibleWhenUnlockedThisDeviceOnly:
-        core_foundation::base::CFTypeRef;
+    static kSecAttrAccessibleWhenUnlockedThisDeviceOnly: core_foundation::base::CFTypeRef;
     static kSecKeyAlgorithmECIESEncryptionCofactorX963SHA256AESGCM:
         core_foundation::base::CFTypeRef;
 
@@ -41,9 +40,7 @@ extern "C" {
         error: *mut core_foundation::error::CFErrorRef,
     ) -> *mut std::ffi::c_void;
 
-    fn SecKeyCopyPublicKey(
-        key: *mut std::ffi::c_void,
-    ) -> *mut std::ffi::c_void;
+    fn SecKeyCopyPublicKey(key: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
 
     fn SecKeyCreateEncryptedData(
         key: *mut std::ffi::c_void,
@@ -65,9 +62,7 @@ extern "C" {
     ) -> i32;
 
     #[allow(dead_code)]
-    fn SecItemDelete(
-        query: core_foundation::dictionary::CFDictionaryRef,
-    ) -> i32;
+    fn SecItemDelete(query: core_foundation::dictionary::CFDictionaryRef) -> i32;
 
     fn SecAccessControlCreateWithFlags(
         allocator: core_foundation::base::CFAllocatorRef,
@@ -130,10 +125,7 @@ impl Drop for SecureEnclaveStorage {
     }
 }
 
-fn se_encrypt(
-    public_key: *mut std::ffi::c_void,
-    plaintext: &[u8],
-) -> Result<Vec<u8>> {
+fn se_encrypt(public_key: *mut std::ffi::c_void, plaintext: &[u8]) -> Result<Vec<u8>> {
     unsafe {
         let plain_data = CFData::from_buffer(plaintext);
         let mut error: core_foundation::error::CFErrorRef = ptr::null_mut();
@@ -157,10 +149,7 @@ fn se_encrypt(
     }
 }
 
-fn se_decrypt(
-    private_key: *mut std::ffi::c_void,
-    ciphertext: &[u8],
-) -> Result<Zeroizing<Vec<u8>>> {
+fn se_decrypt(private_key: *mut std::ffi::c_void, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     unsafe {
         let cipher_data = CFData::from_buffer(ciphertext);
         let mut error: core_foundation::error::CFErrorRef = ptr::null_mut();
@@ -194,8 +183,7 @@ fn find_existing_key() -> Result<Option<SecureEnclaveStorage>> {
         );
         query.set(
             CFString::wrap_under_get_rule(kSecAttrKeyType),
-            CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom)
-                .as_CFType(),
+            CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
         );
         query.set(
             CFString::wrap_under_get_rule(kSecAttrLabel),
@@ -211,32 +199,24 @@ fn find_existing_key() -> Result<Option<SecureEnclaveStorage>> {
         );
         query.set(
             CFString::wrap_under_get_rule(kSecAttrKeyClass),
-            CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate)
-                .as_CFType(),
+            CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate).as_CFType(),
         );
 
         let mut result: core_foundation::base::CFTypeRef = ptr::null_mut();
-        let status = SecItemCopyMatching(
-            query.as_concrete_TypeRef(),
-            &mut result,
-        );
+        let status = SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result);
 
         if status == ERR_SEC_ITEM_NOT_FOUND || result.is_null() {
             return Ok(None);
         }
         if status != 0 {
-            return Err(anyhow!(
-                "Keychain query failed with status {status}"
-            ));
+            return Err(anyhow!("Keychain query failed with status {status}"));
         }
 
         let private_key_ref = result as *mut std::ffi::c_void;
         let public_key_ref = SecKeyCopyPublicKey(private_key_ref);
         if public_key_ref.is_null() {
             core_foundation::base::CFRelease(result);
-            return Err(anyhow!(
-                "failed to extract public key from SE private key"
-            ));
+            return Err(anyhow!("failed to extract public key from SE private key"));
         }
 
         Ok(Some(SecureEnclaveStorage {
@@ -263,10 +243,7 @@ fn create_access_control(biometric: bool) -> Result<core_foundation::base::CFTyp
         );
 
         if access_control.is_null() {
-            return Err(cf_error_to_anyhow(
-                error,
-                "failed to create access control",
-            ));
+            return Err(cf_error_to_anyhow(error, "failed to create access control"));
         }
 
         Ok(access_control)
@@ -274,16 +251,15 @@ fn create_access_control(biometric: bool) -> Result<core_foundation::base::CFTyp
 }
 
 fn create_new_key(biometric: bool) -> Result<SecureEnclaveStorage> {
-    let access_control = create_access_control(biometric)
-        .context("creating SE access control policy")?;
+    let access_control =
+        create_access_control(biometric).context("creating SE access control policy")?;
 
     unsafe {
         let mut attrs = CFMutableDictionary::new();
 
         attrs.set(
             CFString::wrap_under_get_rule(kSecAttrKeyType),
-            CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom)
-                .as_CFType(),
+            CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
         );
         attrs.set(
             CFString::wrap_under_get_rule(kSecAttrKeySizeInBits),
@@ -291,8 +267,7 @@ fn create_new_key(biometric: bool) -> Result<SecureEnclaveStorage> {
         );
         attrs.set(
             CFString::wrap_under_get_rule(kSecAttrTokenID),
-            CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave)
-                .as_CFType(),
+            CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave).as_CFType(),
         );
 
         // Private key attributes
@@ -316,10 +291,7 @@ fn create_new_key(biometric: bool) -> Result<SecureEnclaveStorage> {
         );
 
         let mut error: core_foundation::error::CFErrorRef = ptr::null_mut();
-        let key_ref = SecKeyCreateRandomKey(
-            attrs.as_concrete_TypeRef(),
-            &mut error,
-        );
+        let key_ref = SecKeyCreateRandomKey(attrs.as_concrete_TypeRef(), &mut error);
 
         // Release access control now that key creation is done
         core_foundation::base::CFRelease(access_control);
@@ -334,9 +306,7 @@ fn create_new_key(biometric: bool) -> Result<SecureEnclaveStorage> {
 
         let public_key_ref = SecKeyCopyPublicKey(key_ref);
         if public_key_ref.is_null() {
-            core_foundation::base::CFRelease(
-                key_ref as core_foundation::base::CFTypeRef,
-            );
+            core_foundation::base::CFRelease(key_ref as core_foundation::base::CFTypeRef);
             return Err(anyhow!(
                 "failed to extract public key from newly created SE key"
             ));
@@ -365,23 +335,17 @@ fn delete_key() -> Result<()> {
         let status = SecItemDelete(query.as_concrete_TypeRef());
 
         if status != 0 && status != ERR_SEC_ITEM_NOT_FOUND {
-            return Err(anyhow!(
-                "failed to delete Keychain key, status: {status}"
-            ));
+            return Err(anyhow!("failed to delete Keychain key, status: {status}"));
         }
 
         Ok(())
     }
 }
 
-fn cf_error_to_anyhow(
-    error: core_foundation::error::CFErrorRef,
-    context: &str,
-) -> anyhow::Error {
+fn cf_error_to_anyhow(error: core_foundation::error::CFErrorRef, context: &str) -> anyhow::Error {
     unsafe {
         if !error.is_null() {
-            let cf_error =
-                core_foundation::error::CFError::wrap_under_create_rule(error);
+            let cf_error = core_foundation::error::CFError::wrap_under_create_rule(error);
             anyhow!("{context}: {cf_error}")
         } else {
             anyhow!("{context}: unknown error")

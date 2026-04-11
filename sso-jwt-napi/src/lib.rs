@@ -34,9 +34,7 @@ pub struct JwtOptions {
 /// const jwt = await getJwt({ env: 'prod', cacheName: 'default' });
 /// ```
 #[napi]
-pub async fn get_jwt(
-    options: Option<JwtOptions>,
-) -> napi::Result<String> {
+pub async fn get_jwt(options: Option<JwtOptions>) -> napi::Result<String> {
     let opts = convert_options(options);
 
     // Run blocking IO (HTTP requests, Secure Enclave/TPM calls) off

@@ -45,9 +45,7 @@ impl Config {
             cache_name: fc
                 .cache_name
                 .unwrap_or_else(|| DEFAULT_CACHE_NAME.to_string()),
-            env_var: fc
-                .env_var
-                .unwrap_or_else(|| DEFAULT_ENV_VAR.to_string()),
+            env_var: fc.env_var.unwrap_or_else(|| DEFAULT_ENV_VAR.to_string()),
             oauth_url: None,
             no_open: false,
             clear: false,
@@ -100,10 +98,7 @@ impl Config {
     pub fn cache_file_path(&self) -> PathBuf {
         // Sanitize cache name: strip path separators and traversal sequences
         // to prevent writing outside the cache directory.
-        let sanitized: String = self
-            .cache_name
-            .replace(['/', '\\'], "")
-            .replace("..", "");
+        let sanitized: String = self.cache_name.replace(['/', '\\'], "").replace("..", "");
         let name = if sanitized.is_empty() {
             "default"
         } else {
@@ -163,8 +158,7 @@ mod tests {
 
     /// Save current SSOJWT env vars, clear them, and return saved values.
     fn save_and_clear_env() -> Vec<Option<String>> {
-        let saved: Vec<_> =
-            SSOJWT_KEYS.iter().map(|k| std::env::var(k).ok()).collect();
+        let saved: Vec<_> = SSOJWT_KEYS.iter().map(|k| std::env::var(k).ok()).collect();
         for key in &SSOJWT_KEYS {
             std::env::remove_var(key);
         }
@@ -210,10 +204,7 @@ mod tests {
         let mut cfg = Config::load().unwrap();
         cfg.environment = "dev".to_string();
         cfg.oauth_url = None;
-        assert_eq!(
-            cfg.oauth_url().unwrap(),
-            "https://auth.dev.example.com"
-        );
+        assert_eq!(cfg.oauth_url().unwrap(), "https://auth.dev.example.com");
     }
 
     #[test]
@@ -306,7 +297,10 @@ env_var = "MY_JWT"
         // "true" enables biometric
         std::env::set_var("SSOJWT_BIOMETRIC", "true");
         let cfg = Config::load().expect("Config::load should succeed");
-        assert!(cfg.biometric, "SSOJWT_BIOMETRIC=true should enable biometric");
+        assert!(
+            cfg.biometric,
+            "SSOJWT_BIOMETRIC=true should enable biometric"
+        );
 
         // "1" enables biometric
         std::env::set_var("SSOJWT_BIOMETRIC", "1");
@@ -316,7 +310,10 @@ env_var = "MY_JWT"
         // "false" disables biometric
         std::env::set_var("SSOJWT_BIOMETRIC", "false");
         let cfg = Config::load().expect("Config::load should succeed");
-        assert!(!cfg.biometric, "SSOJWT_BIOMETRIC=false should disable biometric");
+        assert!(
+            !cfg.biometric,
+            "SSOJWT_BIOMETRIC=false should disable biometric"
+        );
 
         restore_env(saved);
     }
@@ -437,7 +434,10 @@ another_unknown = 42
             !filename.contains('/'),
             "slashes should be stripped: {filename}"
         );
-        assert!(filename.ends_with(".enc"), "should still end in .enc: {filename}");
+        assert!(
+            filename.ends_with(".enc"),
+            "should still end in .enc: {filename}"
+        );
 
         // Pure traversal with nothing left should fall back to "default"
         cfg.cache_name = "../..".to_string();

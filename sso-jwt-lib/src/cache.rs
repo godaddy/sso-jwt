@@ -49,8 +49,8 @@ fn now_secs() -> u64 {
 /// Per-token expiration max age in seconds.
 pub fn max_age_secs(risk_level: u8) -> u64 {
     match risk_level {
-        1 => 86400,  // 24h
-        3 => 3600,   // 1h
+        1 => 86400, // 24h
+        3 => 3600,  // 1h
         // 2 and any other value default to medium (12h)
         _ => 43200,
     }
@@ -59,8 +59,8 @@ pub fn max_age_secs(risk_level: u8) -> u64 {
 /// How long before expiration we start attempting refresh.
 fn refresh_window_secs(risk_level: u8) -> u64 {
     match risk_level {
-        1 => 7200,   // last 2h of 24h
-        3 => 600,    // last 10m of 1h
+        1 => 7200, // last 2h of 24h
+        3 => 600,  // last 10m of 1h
         // 2 and any other value default to last 1h of 12h
         _ => 3600,
     }
@@ -72,19 +72,15 @@ const GRACE_SECS: u64 = 300; // 5 minutes
 /// Absolute session timeout -- kills the session regardless of token freshness.
 fn session_timeout_secs(risk_level: u8) -> u64 {
     match risk_level {
-        1 => 259200,  // 72h
-        3 => 28800,   // 8h
+        1 => 259200, // 72h
+        3 => 28800,  // 8h
         // 2 and any other value default to 24h
         _ => 86400,
     }
 }
 
 /// Classify the token into a lifecycle state based on timestamps.
-pub fn classify_token(
-    token_iat: u64,
-    session_start: u64,
-    risk_level: u8,
-) -> TokenState {
+pub fn classify_token(token_iat: u64, session_start: u64, risk_level: u8) -> TokenState {
     let now = now_secs();
 
     // Absolute session timeout check
@@ -144,8 +140,7 @@ pub fn read_header(path: &Path) -> Result<Option<CacheHeader>> {
         return Ok(None);
     }
 
-    let mut file =
-        fs::File::open(path).context("failed to open cache file")?;
+    let mut file = fs::File::open(path).context("failed to open cache file")?;
     let mut header_buf = [0_u8; HEADER_SIZE];
 
     match file.read_exact(&mut header_buf) {
@@ -208,8 +203,7 @@ pub fn write_cache(
     risk_level: u8,
     session_start: u64,
 ) -> Result<()> {
-    let token_iat =
-        jwt::extract_iat(token).unwrap_or_else(|_| now_secs());
+    let token_iat = jwt::extract_iat(token).unwrap_or_else(|_| now_secs());
 
     let ciphertext = storage
         .encrypt(token.as_bytes())
@@ -217,12 +211,10 @@ pub fn write_cache(
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .context("failed to create cache directory")?;
+        fs::create_dir_all(parent).context("failed to create cache directory")?;
     }
 
-    let mut file =
-        fs::File::create(path).context("failed to create cache file")?;
+    let mut file = fs::File::create(path).context("failed to create cache file")?;
 
     // Write header
     file.write_all(MAGIC)?;
@@ -253,27 +245,19 @@ pub fn clear(config: &Config) -> Result<()> {
 /// 2. Classify token state
 /// 3. Return cached / refresh / re-auth as appropriate
 #[allow(clippy::print_stderr)]
-pub fn resolve_token(
-    config: &Config,
-    storage: &dyn SecureStorage,
-) -> Result<String> {
+pub fn resolve_token(config: &Config, storage: &dyn SecureStorage) -> Result<String> {
     let cache_path = config.cache_file_path();
 
     // Step 1: Read cache header
     let header = read_header(&cache_path)?;
 
     if let Some(header) = header {
-        let state = classify_token(
-            header.token_iat,
-            header.session_start,
-            config.risk_level,
-        );
+        let state = classify_token(header.token_iat, header.session_start, config.risk_level);
 
         match state {
             TokenState::Fresh => {
                 // Decrypt and return
-                let ciphertext =
-                    read_ciphertext(&cache_path, header.ciphertext_len)?;
+                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
                 let plaintext = storage
                     .decrypt(&ciphertext)
                     .context("failed to decrypt cached token")?;
@@ -284,18 +268,14 @@ pub fn resolve_token(
 
             TokenState::RefreshWindow => {
                 // Decrypt, try refresh, fall back to cached
-                let ciphertext =
-                    read_ciphertext(&cache_path, header.ciphertext_len)?;
+                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
                 let plaintext = storage
                     .decrypt(&ciphertext)
                     .context("failed to decrypt cached token")?;
                 let token = String::from_utf8(plaintext.to_vec())
                     .context("cached token is not valid UTF-8")?;
 
-                match oauth::heartbeat_refresh(
-                    &config.sso_url(),
-                    &token,
-                ) {
+                match oauth::heartbeat_refresh(&config.sso_url(), &token) {
                     Some(new_token) => {
                         // Cache the refreshed token, preserve session_start
                         write_cache(
@@ -309,10 +289,7 @@ pub fn resolve_token(
                     }
                     None => {
                         let remaining_secs = max_age_secs(config.risk_level)
-                            .saturating_sub(
-                                now_secs()
-                                    .saturating_sub(header.token_iat),
-                            );
+                            .saturating_sub(now_secs().saturating_sub(header.token_iat));
                         let remaining_min = remaining_secs / 60;
                         eprintln!(
                             "warning: token refresh failed, using cached token (expires in {remaining_min}m)"
@@ -324,18 +301,14 @@ pub fn resolve_token(
 
             TokenState::Grace => {
                 // Decrypt, try refresh, fall back to full re-auth
-                let ciphertext =
-                    read_ciphertext(&cache_path, header.ciphertext_len)?;
+                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
                 let plaintext = storage
                     .decrypt(&ciphertext)
                     .context("failed to decrypt cached token")?;
                 let token = String::from_utf8(plaintext.to_vec())
                     .context("cached token is not valid UTF-8")?;
 
-                if let Some(new_token) = oauth::heartbeat_refresh(
-                    &config.sso_url(),
-                    &token,
-                ) {
+                if let Some(new_token) = oauth::heartbeat_refresh(&config.sso_url(), &token) {
                     write_cache(
                         &cache_path,
                         storage,
@@ -359,8 +332,7 @@ pub fn resolve_token(
     let auto_open = !config.no_open;
     let token = oauth::authenticate(&oauth_url, auto_open)?;
 
-    let token_iat =
-        jwt::extract_iat(&token).unwrap_or_else(|_| now_secs());
+    let token_iat = jwt::extract_iat(&token).unwrap_or_else(|_| now_secs());
 
     write_cache(
         &cache_path,
@@ -382,10 +354,9 @@ mod tests {
     fn make_jwt(iat: u64) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(format!(r#"{{"iat":{iat}}}"#));
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode("sig");
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"iat":{iat}}}"#));
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("sig");
         format!("{header}.{payload}.{sig}")
     }
 
@@ -428,8 +399,7 @@ mod tests {
         let now = 1700000000;
         let session_start = now - 90000; // 25h session (24h timeout for RL2)
         let token_iat = now - 100; // token itself is fresh
-        let state =
-            classify_token_at(now, token_iat, session_start, 2);
+        let state = classify_token_at(now, token_iat, session_start, 2);
         assert_eq!(state, TokenState::Dead);
     }
 
@@ -438,8 +408,7 @@ mod tests {
         let now = 1700000000;
         let session_start = now - 80000; // 22h session (within 24h)
         let token_iat = now - 100;
-        let state =
-            classify_token_at(now, token_iat, session_start, 2);
+        let state = classify_token_at(now, token_iat, session_start, 2);
         assert_eq!(state, TokenState::Fresh);
     }
 
@@ -547,11 +516,9 @@ mod tests {
         write_cache(&path, &storage, &token, 2, 1700000000).unwrap();
 
         let header = read_header(&path).unwrap().unwrap();
-        let ciphertext =
-            read_ciphertext(&path, header.ciphertext_len).unwrap();
+        let ciphertext = read_ciphertext(&path, header.ciphertext_len).unwrap();
         let plaintext = storage.decrypt(&ciphertext).unwrap();
-        let recovered =
-            String::from_utf8(plaintext.to_vec()).unwrap();
+        let recovered = String::from_utf8(plaintext.to_vec()).unwrap();
         assert_eq!(recovered, token);
     }
 
@@ -613,25 +580,11 @@ mod tests {
         let original_session_start = 1699900000;
         let token1 = make_jwt(1700000000);
 
-        write_cache(
-            &path,
-            &storage,
-            &token1,
-            2,
-            original_session_start,
-        )
-        .unwrap();
+        write_cache(&path, &storage, &token1, 2, original_session_start).unwrap();
 
         // "Refresh" -- new token but same session_start
         let token2 = make_jwt(1700043200);
-        write_cache(
-            &path,
-            &storage,
-            &token2,
-            2,
-            original_session_start,
-        )
-        .unwrap();
+        write_cache(&path, &storage, &token2, 2, original_session_start).unwrap();
 
         let header = read_header(&path).unwrap().unwrap();
         assert_eq!(header.session_start, original_session_start);
@@ -648,10 +601,7 @@ mod tests {
     #[test]
     fn edge_case_zero_age() {
         let now = 1700000000;
-        assert_eq!(
-            classify_token_at(now, now, now, 2),
-            TokenState::Fresh
-        );
+        assert_eq!(classify_token_at(now, now, now, 2), TokenState::Fresh);
     }
 
     #[test]
@@ -751,10 +701,7 @@ mod tests {
         // token_iat is 10s in the future (server clock skew)
         let iat = now + 10;
         // saturating_sub(now, iat) = 0, so token_age = 0 => Fresh
-        assert_eq!(
-            classify_token_at(now, iat, now, 2),
-            TokenState::Fresh
-        );
+        assert_eq!(classify_token_at(now, iat, now, 2), TokenState::Fresh);
     }
 
     #[test]
@@ -773,20 +720,14 @@ mod tests {
     fn token_iat_zero_with_large_now_is_dead() {
         let now = 1700000000;
         // token_iat = 0, token_age = 1700000000 => well past any max_age
-        assert_eq!(
-            classify_token_at(now, 0, now, 2),
-            TokenState::Dead
-        );
+        assert_eq!(classify_token_at(now, 0, now, 2), TokenState::Dead);
     }
 
     #[test]
     fn session_start_zero_with_large_now_is_dead() {
         let now = 1700000000;
         // session_start = 0, session_age = 1700000000 => exceeds any session timeout
-        assert_eq!(
-            classify_token_at(now, now - 100, 0, 2),
-            TokenState::Dead
-        );
+        assert_eq!(classify_token_at(now, now - 100, 0, 2), TokenState::Dead);
     }
 
     // ---- Cache format edge cases ----
@@ -807,8 +748,9 @@ mod tests {
         assert_eq!(data.len(), HEADER_SIZE);
         fs::write(&path, &data).expect("write header-only file");
 
-        let header =
-            read_header(&path).expect("read_header").expect("header present");
+        let header = read_header(&path)
+            .expect("read_header")
+            .expect("header present");
         assert_eq!(header.ciphertext_len, 0);
 
         let ct = read_ciphertext(&path, 0).expect("read empty ciphertext");
@@ -856,8 +798,9 @@ mod tests {
         data[22..26].copy_from_slice(&0_u32.to_be_bytes());
         fs::write(&path, &data).expect("write exact header file");
 
-        let header =
-            read_header(&path).expect("read_header").expect("header present");
+        let header = read_header(&path)
+            .expect("read_header")
+            .expect("header present");
         assert_eq!(header.risk_level, 3);
         assert_eq!(header.token_iat, 42);
         assert_eq!(header.session_start, 99);
@@ -872,8 +815,7 @@ mod tests {
 
         for rl in [1_u8, 2, 3] {
             let path = dir.path().join(format!("rl{rl}.enc"));
-            write_cache(&path, &storage, &token, rl, 1700000000)
-                .expect("write_cache");
+            write_cache(&path, &storage, &token, rl, 1700000000).expect("write_cache");
             let header = read_header(&path)
                 .expect("read_header")
                 .expect("header present");
@@ -890,28 +832,20 @@ mod tests {
         // Build a JWT with a large payload (~1KB)
         let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let large_payload = format!(
-            r#"{{"iat":1700000000,"data":"{}"}}"#,
-            "A".repeat(900)
-        );
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(&large_payload);
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode("sig");
+        let large_payload = format!(r#"{{"iat":1700000000,"data":"{}"}}"#, "A".repeat(900));
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&large_payload);
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
         assert!(token.len() > 1000);
 
-        write_cache(&path, &storage, &token, 2, 1700000000)
-            .expect("write_cache");
+        write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
         let header = read_header(&path)
             .expect("read_header")
             .expect("header present");
-        let ct = read_ciphertext(&path, header.ciphertext_len)
-            .expect("read_ciphertext");
+        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered =
-            String::from_utf8(pt.to_vec()).expect("valid utf-8");
+        let recovered = String::from_utf8(pt.to_vec()).expect("valid utf-8");
         assert_eq!(recovered, token);
     }
 
@@ -923,28 +857,20 @@ mod tests {
 
         let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let large_payload = format!(
-            r#"{{"iat":1700000000,"data":"{}"}}"#,
-            "B".repeat(9000)
-        );
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(&large_payload);
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode("sig");
+        let large_payload = format!(r#"{{"iat":1700000000,"data":"{}"}}"#, "B".repeat(9000));
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&large_payload);
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
         assert!(token.len() > 10000);
 
-        write_cache(&path, &storage, &token, 2, 1700000000)
-            .expect("write_cache");
+        write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
         let header = read_header(&path)
             .expect("read_header")
             .expect("header present");
-        let ct = read_ciphertext(&path, header.ciphertext_len)
-            .expect("read_ciphertext");
+        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered =
-            String::from_utf8(pt.to_vec()).expect("valid utf-8");
+        let recovered = String::from_utf8(pt.to_vec()).expect("valid utf-8");
         assert_eq!(recovered, token);
     }
 
@@ -959,10 +885,9 @@ mod tests {
         // Build a JWT without an iat claim
         let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"sub":"user123"}"#);
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode("sig");
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("sig");
         let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
 
         write_cache(&path, &storage, &token, 2, 1700000000)
@@ -980,11 +905,9 @@ mod tests {
         );
 
         // Verify the token itself round-trips
-        let ct = read_ciphertext(&path, header.ciphertext_len)
-            .expect("read_ciphertext");
+        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered =
-            String::from_utf8(pt.to_vec()).expect("valid utf-8");
+        let recovered = String::from_utf8(pt.to_vec()).expect("valid utf-8");
         assert_eq!(recovered, token);
     }
 
@@ -1025,8 +948,7 @@ mod tests {
         data.extend_from_slice(&payload);
         fs::write(&path, &data).expect("write file");
 
-        let ct = read_ciphertext(&path, payload.len() as u32)
-            .expect("read_ciphertext");
+        let ct = read_ciphertext(&path, payload.len() as u32).expect("read_ciphertext");
         assert_eq!(ct, payload);
     }
 
@@ -1042,10 +964,8 @@ mod tests {
         let token_a = make_jwt(1700000000);
         let token_b = make_jwt(1700100000);
 
-        write_cache(&path_a, &storage, &token_a, 1, 1700000000)
-            .expect("write cache A");
-        write_cache(&path_b, &storage, &token_b, 3, 1700100000)
-            .expect("write cache B");
+        write_cache(&path_a, &storage, &token_a, 1, 1700000000).expect("write cache A");
+        write_cache(&path_b, &storage, &token_b, 3, 1700100000).expect("write cache B");
 
         // Read back cache A
         let hdr_a = read_header(&path_a)
@@ -1053,13 +973,9 @@ mod tests {
             .expect("header A present");
         assert_eq!(hdr_a.risk_level, 1);
         assert_eq!(hdr_a.token_iat, 1700000000);
-        let ct_a = read_ciphertext(&path_a, hdr_a.ciphertext_len)
-            .expect("read_ciphertext A");
+        let ct_a = read_ciphertext(&path_a, hdr_a.ciphertext_len).expect("read_ciphertext A");
         let pt_a = storage.decrypt(&ct_a).expect("decrypt A");
-        assert_eq!(
-            String::from_utf8(pt_a.to_vec()).expect("utf-8 A"),
-            token_a
-        );
+        assert_eq!(String::from_utf8(pt_a.to_vec()).expect("utf-8 A"), token_a);
 
         // Read back cache B
         let hdr_b = read_header(&path_b)
@@ -1067,13 +983,9 @@ mod tests {
             .expect("header B present");
         assert_eq!(hdr_b.risk_level, 3);
         assert_eq!(hdr_b.token_iat, 1700100000);
-        let ct_b = read_ciphertext(&path_b, hdr_b.ciphertext_len)
-            .expect("read_ciphertext B");
+        let ct_b = read_ciphertext(&path_b, hdr_b.ciphertext_len).expect("read_ciphertext B");
         let pt_b = storage.decrypt(&ct_b).expect("decrypt B");
-        assert_eq!(
-            String::from_utf8(pt_b.to_vec()).expect("utf-8 B"),
-            token_b
-        );
+        assert_eq!(String::from_utf8(pt_b.to_vec()).expect("utf-8 B"), token_b);
     }
 
     // ---- Overwrite existing cache ----
@@ -1087,23 +999,19 @@ mod tests {
         let token_old = make_jwt(1700000000);
         let token_new = make_jwt(1700050000);
 
-        write_cache(&path, &storage, &token_old, 2, 1700000000)
-            .expect("write old cache");
+        write_cache(&path, &storage, &token_old, 2, 1700000000).expect("write old cache");
 
         // Overwrite with new token
-        write_cache(&path, &storage, &token_new, 2, 1700000000)
-            .expect("write new cache");
+        write_cache(&path, &storage, &token_new, 2, 1700000000).expect("write new cache");
 
         let header = read_header(&path)
             .expect("read_header")
             .expect("header present");
         assert_eq!(header.token_iat, 1700050000);
 
-        let ct = read_ciphertext(&path, header.ciphertext_len)
-            .expect("read_ciphertext");
+        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered =
-            String::from_utf8(pt.to_vec()).expect("valid utf-8");
+        let recovered = String::from_utf8(pt.to_vec()).expect("valid utf-8");
         assert_eq!(recovered, token_new);
         assert_ne!(recovered, token_old);
     }

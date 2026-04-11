@@ -30,9 +30,7 @@ pub fn parse_claims(token: &str) -> Result<JwtClaims> {
 /// Extract the `iat` (issued-at) claim as a Unix timestamp in seconds.
 pub fn extract_iat(token: &str) -> Result<u64> {
     let claims = parse_claims(token)?;
-    claims
-        .iat
-        .ok_or_else(|| anyhow!("JWT missing 'iat' claim"))
+    claims.iat.ok_or_else(|| anyhow!("JWT missing 'iat' claim"))
 }
 
 /// Decode base64url with or without padding. JWTs use base64url without
@@ -42,9 +40,7 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>> {
         .decode(input)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(input))
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(input))
-        .or_else(|_| {
-            base64::engine::general_purpose::STANDARD_NO_PAD.decode(input)
-        })
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(input))
         .map_err(|e| anyhow!("base64 decode error: {e}"))
 }
 
@@ -62,9 +58,7 @@ mod tests {
 
     #[test]
     fn parse_valid_jwt_with_all_claims() {
-        let token = make_jwt(
-            r#"{"iat":1700000000,"exp":1700086400,"sub":"user@example.com"}"#,
-        );
+        let token = make_jwt(r#"{"iat":1700000000,"exp":1700086400,"sub":"user@example.com"}"#);
         let claims = parse_claims(&token).unwrap();
         assert_eq!(claims.iat, Some(1700000000));
         assert_eq!(claims.exp, Some(1700086400));
@@ -106,9 +100,7 @@ mod tests {
 
     #[test]
     fn unknown_claims_ignored() {
-        let token = make_jwt(
-            r#"{"iat":1700000000,"custom":"value","nested":{"a":1}}"#,
-        );
+        let token = make_jwt(r#"{"iat":1700000000,"custom":"value","nested":{"a":1}}"#);
         let claims = parse_claims(&token).unwrap();
         assert_eq!(claims.iat, Some(1700000000));
     }
@@ -116,10 +108,8 @@ mod tests {
     #[test]
     fn handles_standard_base64_padding() {
         // Some JWT implementations use standard base64 with padding
-        let header =
-            base64::engine::general_purpose::STANDARD.encode(r#"{"alg":"HS256"}"#);
-        let payload =
-            base64::engine::general_purpose::STANDARD.encode(r#"{"iat":42}"#);
+        let header = base64::engine::general_purpose::STANDARD.encode(r#"{"alg":"HS256"}"#);
+        let payload = base64::engine::general_purpose::STANDARD.encode(r#"{"iat":42}"#);
         let sig = base64::engine::general_purpose::STANDARD.encode("sig");
         let token = format!("{header}.{payload}.{sig}");
         assert_eq!(extract_iat(&token).unwrap(), 42);
@@ -198,15 +188,10 @@ mod tests {
         let long_value = "a".repeat(1000);
         let json = format!(r#"{{"sub":"{long_value}","iat":42}}"#);
         let token = make_jwt(&json);
-        let claims =
-            parse_claims(&token).expect("long payload should parse fine");
+        let claims = parse_claims(&token).expect("long payload should parse fine");
         assert_eq!(claims.iat, Some(42));
         assert_eq!(
-            claims
-                .sub
-                .as_ref()
-                .expect("sub should be present")
-                .len(),
+            claims.sub.as_ref().expect("sub should be present").len(),
             1000
         );
     }
@@ -214,16 +199,14 @@ mod tests {
     #[test]
     fn unicode_claims_parse() {
         let token = make_jwt(r#"{"sub":"用户","iat":99}"#);
-        let claims =
-            parse_claims(&token).expect("unicode claims should parse fine");
+        let claims = parse_claims(&token).expect("unicode claims should parse fine");
         assert_eq!(claims.sub.as_deref(), Some("用户"));
         assert_eq!(claims.iat, Some(99));
     }
 
     #[test]
     fn whitespace_only_input_errors() {
-        let err =
-            parse_claims("   ").expect_err("whitespace-only token should fail");
+        let err = parse_claims("   ").expect_err("whitespace-only token should fail");
         assert!(
             err.to_string().contains("expected 3 parts"),
             "unexpected error: {err}"
@@ -234,8 +217,7 @@ mod tests {
     fn dots_only_input_errors() {
         // ".." splits into ["", "", ""] which is 3 parts, but base64 decode
         // of empty string yields empty bytes, and empty bytes aren't valid JSON.
-        let err =
-            parse_claims("..").expect_err("dots-only token should fail");
+        let err = parse_claims("..").expect_err("dots-only token should fail");
         assert!(
             err.to_string().contains("failed to parse JWT payload"),
             "unexpected error: {err}"

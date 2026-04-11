@@ -59,11 +59,7 @@ pub fn platform_storage(biometric: bool) -> Result<Box<dyn SecureStorage>> {
         }
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "linux"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = biometric;
         anyhow::bail!("unsupported platform: no secure storage backend available")

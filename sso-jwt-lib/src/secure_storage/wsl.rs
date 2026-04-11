@@ -67,17 +67,11 @@ impl WslTpmBridge {
         Ok(bridge)
     }
 
-    fn call(
-        &self,
-        method: &str,
-        data: Option<&[u8]>,
-    ) -> Result<Option<Vec<u8>>> {
+    fn call(&self, method: &str, data: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
         let request = BridgeRequest {
             method: method.to_string(),
             params: BridgeParams {
-                data: data.map(|d| {
-                    base64::engine::general_purpose::STANDARD.encode(d)
-                }),
+                data: data.map(|d| base64::engine::general_purpose::STANDARD.encode(d)),
                 biometric: Some(self.biometric),
             },
         };
@@ -89,12 +83,7 @@ impl WslTpmBridge {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| {
-                format!(
-                    "failed to spawn TPM bridge at {}",
-                    self.bridge_path
-                )
-            })?;
+            .with_context(|| format!("failed to spawn TPM bridge at {}", self.bridge_path))?;
 
         // Send request
         if let Some(stdin) = child.stdin.as_mut() {
@@ -127,8 +116,7 @@ impl WslTpmBridge {
             ));
         }
 
-        let response: BridgeResponse =
-            serde_json::from_str(response_line.trim())?;
+        let response: BridgeResponse = serde_json::from_str(response_line.trim())?;
 
         if let Some(err) = response.error {
             return Err(anyhow!("TPM bridge error: {err}"));
@@ -136,8 +124,7 @@ impl WslTpmBridge {
 
         match response.result {
             Some(b64) => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&b64)?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(&b64)?;
                 Ok(Some(bytes))
             }
             None => Ok(None),
@@ -233,8 +220,7 @@ mod tests {
                 biometric: Some(true),
             },
         };
-        let json = serde_json::to_string(&req)
-            .expect("serialization should succeed");
+        let json = serde_json::to_string(&req).expect("serialization should succeed");
         assert!(json.contains("\"method\":\"init\""));
         assert!(json.contains("\"data\":null"));
         assert!(json.contains("\"biometric\":true"));
@@ -242,10 +228,9 @@ mod tests {
 
     #[test]
     fn bridge_response_with_both_result_and_error() {
-        let json =
-            r#"{"result":"dGVzdA==","error":"partial failure"}"#;
-        let resp: BridgeResponse = serde_json::from_str(json)
-            .expect("both result and error should parse");
+        let json = r#"{"result":"dGVzdA==","error":"partial failure"}"#;
+        let resp: BridgeResponse =
+            serde_json::from_str(json).expect("both result and error should parse");
         assert_eq!(resp.result.as_deref(), Some("dGVzdA=="));
         assert_eq!(resp.error.as_deref(), Some("partial failure"));
     }
@@ -253,8 +238,7 @@ mod tests {
     #[test]
     fn bridge_response_with_both_null() {
         let json = r#"{"result":null,"error":null}"#;
-        let resp: BridgeResponse = serde_json::from_str(json)
-            .expect("both null should parse");
+        let resp: BridgeResponse = serde_json::from_str(json).expect("both null should parse");
         assert!(resp.result.is_none());
         assert!(resp.error.is_none());
     }
