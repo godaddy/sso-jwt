@@ -17,7 +17,14 @@ This repository is a Cargo workspace containing four crates:
 
 ## Installation
 
-### CLI from source
+### Homebrew (macOS)
+
+```bash
+brew tap jgowdy/sso-jwt
+brew install sso-jwt
+```
+
+### From source
 
 ```bash
 cargo install --path sso-jwt
@@ -29,12 +36,6 @@ cargo install --path sso-jwt
 cd sso-jwt-napi
 npm install
 npm run build
-```
-
-### Homebrew (planned)
-
-```bash
-brew install sso-jwt
 ```
 
 ## Quick Start
