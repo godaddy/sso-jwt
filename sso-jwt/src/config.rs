@@ -98,7 +98,18 @@ impl Config {
     }
 
     pub fn cache_file_path(&self) -> PathBuf {
-        Self::cache_dir().join(format!("{}.enc", self.cache_name))
+        // Sanitize cache name: strip path separators and traversal sequences
+        // to prevent writing outside the cache directory.
+        let sanitized: String = self
+            .cache_name
+            .replace(['/', '\\'], "")
+            .replace("..", "");
+        let name = if sanitized.is_empty() {
+            "default"
+        } else {
+            &sanitized
+        };
+        Self::cache_dir().join(format!("{name}.enc"))
     }
 
     /// Resolve the OAuth service URL for the configured environment.
@@ -399,5 +410,89 @@ another_unknown = 42
             cfg.oauth_url().expect("custom oauth_url"),
             "https://my-custom.example.com"
         );
+    }
+
+    #[test]
+    fn cache_name_path_traversal_stripped() {
+        let mut cfg = Config {
+            environment: DEFAULT_ENVIRONMENT.to_string(),
+            risk_level: DEFAULT_RISK_LEVEL,
+            biometric: false,
+            cache_name: "../../etc/passwd".to_string(),
+            env_var: DEFAULT_ENV_VAR.to_string(),
+            oauth_url: None,
+            no_open: false,
+            clear: false,
+        };
+        let path = cfg.cache_file_path();
+        let filename = path
+            .file_name()
+            .expect("should have filename")
+            .to_string_lossy();
+        assert!(
+            !filename.contains(".."),
+            "path traversal should be stripped: {filename}"
+        );
+        assert!(
+            !filename.contains('/'),
+            "slashes should be stripped: {filename}"
+        );
+        assert!(filename.ends_with(".enc"), "should still end in .enc: {filename}");
+
+        // Pure traversal with nothing left should fall back to "default"
+        cfg.cache_name = "../..".to_string();
+        let path = cfg.cache_file_path();
+        let filename = path
+            .file_name()
+            .expect("should have filename")
+            .to_string_lossy();
+        assert_eq!(filename, "default.enc");
+    }
+
+    #[test]
+    fn cache_name_backslash_stripped() {
+        let cfg = Config {
+            environment: DEFAULT_ENVIRONMENT.to_string(),
+            risk_level: DEFAULT_RISK_LEVEL,
+            biometric: false,
+            cache_name: r"..\..\windows\system32".to_string(),
+            env_var: DEFAULT_ENV_VAR.to_string(),
+            oauth_url: None,
+            no_open: false,
+            clear: false,
+        };
+        let path = cfg.cache_file_path();
+        let filename = path
+            .file_name()
+            .expect("should have filename")
+            .to_string_lossy();
+        assert!(
+            !filename.contains('\\'),
+            "backslashes should be stripped: {filename}"
+        );
+        assert!(
+            !filename.contains(".."),
+            "traversal should be stripped: {filename}"
+        );
+    }
+
+    #[test]
+    fn cache_name_normal_values_unchanged() {
+        let cfg = Config {
+            environment: DEFAULT_ENVIRONMENT.to_string(),
+            risk_level: DEFAULT_RISK_LEVEL,
+            biometric: false,
+            cache_name: "my-project".to_string(),
+            env_var: DEFAULT_ENV_VAR.to_string(),
+            oauth_url: None,
+            no_open: false,
+            clear: false,
+        };
+        let path = cfg.cache_file_path();
+        let filename = path
+            .file_name()
+            .expect("should have filename")
+            .to_string_lossy();
+        assert_eq!(filename, "my-project.enc");
     }
 }

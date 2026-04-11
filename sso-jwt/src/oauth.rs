@@ -127,8 +127,25 @@ pub fn format_user_code(code: &str) -> String {
 }
 
 /// Open the verification URI in the user's default browser.
+/// Falls back to the `$BROWSER` environment variable if the platform
+/// opener fails (useful in containers / VS Code devcontainers).
 pub fn open_browser(uri: &str) -> Result<()> {
-    open::that(uri).context("failed to open browser")
+    match open::that(uri) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Ok(browser) = std::env::var("BROWSER") {
+                std::process::Command::new(&browser)
+                    .arg(uri)
+                    .spawn()
+                    .with_context(|| {
+                        format!("failed to open browser via $BROWSER ({browser})")
+                    })?;
+                Ok(())
+            } else {
+                Err(e).context("failed to open browser")
+            }
+        }
+    }
 }
 
 /// Run the full OAuth Device Code flow: request code, prompt user,
