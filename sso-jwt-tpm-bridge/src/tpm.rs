@@ -23,7 +23,13 @@ pub fn ensure_key(biometric: bool) -> Result<()> {
         let key_name = HSTRING::from(KEY_NAME);
         let mut key = NCRYPT_KEY_HANDLE::default();
 
-        let opened = NCryptOpenKey(provider, &mut key, &key_name, 0, 0);
+        let opened = NCryptOpenKey(
+            provider,
+            &mut key,
+            &key_name,
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
+        );
 
         if opened.is_ok() {
             // Key exists
@@ -38,8 +44,8 @@ pub fn ensure_key(biometric: bool) -> Result<()> {
             &mut key,
             BCRYPT_ECDH_P256_ALGORITHM,
             &key_name,
-            0,
-            0,
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
         )
         .map_err(|e| anyhow!("failed to create TPM key: {e}"))?;
 
@@ -62,7 +68,8 @@ pub fn ensure_key(biometric: bool) -> Result<()> {
             );
         }
 
-        NCryptFinalizeKey(key, 0).map_err(|e| anyhow!("failed to finalize TPM key: {e}"))?;
+        NCryptFinalizeKey(key, NCRYPT_FLAGS::default())
+            .map_err(|e| anyhow!("failed to finalize TPM key: {e}"))?;
 
         NCryptFreeObject(key);
         NCryptFreeObject(provider);
@@ -148,7 +155,13 @@ pub fn destroy() -> Result<()> {
             .map_err(|e| anyhow!("open provider: {e}"))?;
 
         let mut key = NCRYPT_KEY_HANDLE::default();
-        let result = NCryptOpenKey(provider, &mut key, &HSTRING::from(KEY_NAME), 0, 0);
+        let result = NCryptOpenKey(
+            provider,
+            &mut key,
+            &HSTRING::from(KEY_NAME),
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
+        );
 
         if result.is_ok() {
             NCryptDeleteKey(key, 0).map_err(|e| anyhow!("delete key: {e}"))?;
@@ -165,7 +178,14 @@ unsafe fn open_key() -> Result<(NCRYPT_PROV_HANDLE, NCRYPT_KEY_HANDLE)> {
         .map_err(|e| anyhow!("open provider: {e}"))?;
 
     let mut key = NCRYPT_KEY_HANDLE::default();
-    NCryptOpenKey(provider, &mut key, &HSTRING::from(KEY_NAME), 0, 0).map_err(|e| {
+    NCryptOpenKey(
+        provider,
+        &mut key,
+        &HSTRING::from(KEY_NAME),
+        CERT_KEY_SPEC(0),
+        NCRYPT_FLAGS::default(),
+    )
+    .map_err(|e| {
         NCryptFreeObject(provider);
         anyhow!("open key: {e}. Run 'sso-jwt' once to create the key.")
     })?;

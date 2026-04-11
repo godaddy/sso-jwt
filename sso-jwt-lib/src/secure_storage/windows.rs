@@ -44,7 +44,15 @@ impl TpmStorage {
         let mut key = NCRYPT_KEY_HANDLE::default();
         let key_name: HSTRING = HSTRING::from("sso-jwt-cache-key");
 
-        let opened = unsafe { NCryptOpenKey(provider, &mut key, &key_name, 0, 0) };
+        let opened = unsafe {
+            NCryptOpenKey(
+                provider,
+                &mut key,
+                &key_name,
+                CERT_KEY_SPEC(0),
+                NCRYPT_FLAGS::default(),
+            )
+        };
 
         if opened.is_err() {
             // Key doesn't exist, create it
@@ -54,8 +62,8 @@ impl TpmStorage {
                     &mut key,
                     BCRYPT_ECDH_P256_ALGORITHM,
                     &key_name,
-                    0,
-                    0,
+                    CERT_KEY_SPEC(0),
+                    NCRYPT_FLAGS::default(),
                 );
                 if status.is_err() {
                     return Err(anyhow!("failed to create TPM key: {status:?}"));
@@ -84,7 +92,7 @@ impl TpmStorage {
                     }
                 }
 
-                let status = NCryptFinalizeKey(key, 0);
+                let status = NCryptFinalizeKey(key, NCRYPT_FLAGS::default());
                 if status.is_err() {
                     return Err(anyhow!("failed to finalize TPM key: {status:?}"));
                 }
@@ -160,8 +168,8 @@ fn tpm_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
             provider,
             &mut key,
             &HSTRING::from("sso-jwt-cache-key"),
-            0,
-            0,
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
         )
         .map_err(|e| anyhow!("open key: {e}"))?;
 
@@ -216,8 +224,8 @@ fn tpm_decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
             provider,
             &mut key,
             &HSTRING::from("sso-jwt-cache-key"),
-            0,
-            0,
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
         )
         .map_err(|e| anyhow!("open key: {e}"))?;
 
@@ -267,8 +275,8 @@ fn tpm_delete_key() -> Result<()> {
             provider,
             &mut key,
             &HSTRING::from("sso-jwt-cache-key"),
-            0,
-            0,
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS::default(),
         );
 
         if result.is_ok() {
