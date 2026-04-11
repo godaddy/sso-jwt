@@ -13,7 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    clippy::ptr_as_ptr,
+    clippy::unseparated_literal_suffix,
+    trivial_casts,
+    unused_must_use,
+    unused_qualifications
+)]
 mod tpm;
 
 #[derive(Deserialize)]
