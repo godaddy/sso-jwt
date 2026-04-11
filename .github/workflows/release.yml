@@ -1,0 +1,259 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary: sso-jwt
+            archive: sso-jwt-aarch64-apple-darwin.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            binary: sso-jwt
+            archive: sso-jwt-x86_64-apple-darwin.tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: sso-jwt
+            archive: sso-jwt-x86_64-unknown-linux-gnu.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: sso-jwt
+            archive: sso-jwt-aarch64-unknown-linux-gnu.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary: sso-jwt.exe
+            archive: sso-jwt-x86_64-pc-windows-msvc.zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "Setting version to ${version}"
+          sed -i'' -e "s/^version = \".*\"/version = \"${version}\"/" sso-jwt/Cargo.toml
+          sed -i'' -e "s/^version = \".*\"/version = \"${version}\"/" sso-jwt-lib/Cargo.toml
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p sso-jwt
+
+      - name: Build TPM bridge (Windows only)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo build --release --target ${{ matrix.target }} -p sso-jwt-tpm-bridge
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          tar czf ${{ matrix.archive }} -C dist .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          Copy-Item target/${{ matrix.target }}/release/sso-jwt-tpm-bridge.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.archive }}
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  msi:
+    name: Build MSI installer
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: sso-jwt-x86_64-pc-windows-msvc.zip
+          path: .
+
+      - name: Extract binaries
+        shell: pwsh
+        run: Expand-Archive -Path sso-jwt-x86_64-pc-windows-msvc.zip -DestinationPath binaries
+
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix
+
+      - name: Create WiX source
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="sso-jwt"
+                     Manufacturer="sso-jwt contributors"
+                     Version="$version"
+                     UpgradeCode="D7E3F4A1-8B2C-4D5E-9F6A-1B2C3D4E5F6A">
+
+              <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <StandardDirectory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="sso-jwt">
+                  <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+                    <File Source="binaries\sso-jwt.exe" />
+                    <File Source="binaries\sso-jwt-tpm-bridge.exe" />
+                    <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+                  </Component>
+                </Directory>
+              </StandardDirectory>
+
+              <Feature Id="ProductFeature" Title="sso-jwt">
+                <ComponentRef Id="MainExecutable" />
+              </Feature>
+            </Package>
+          </Wix>
+          "@ | Out-File -FilePath sso-jwt.wxs -Encoding UTF8
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          wix build sso-jwt.wxs -o sso-jwt-x86_64-windows.msi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sso-jwt-x86_64-windows.msi
+          path: sso-jwt-x86_64-windows.msi
+
+  release:
+    name: Create Release
+    needs: [build, msi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum sso-jwt-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            artifacts/sso-jwt-* \
+            artifacts/checksums.txt
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute SHA256s
+        id: sha
+        run: |
+          arm_sha=$(sha256sum artifacts/sso-jwt-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          intel_sha=$(sha256sum artifacts/sso-jwt-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          echo "arm=$arm_sha" >> "$GITHUB_OUTPUT"
+          echo "intel=$intel_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula in tap repo
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+
+          gh repo clone jgowdy/homebrew-sso-jwt /tmp/tap
+          cd /tmp/tap
+
+          cat > Formula/sso-jwt.rb << RUBY
+          class SsoJwt < Formula
+            desc "SSO JWT CLI with hardware-backed secure caching (Secure Enclave / TPM)"
+            homepage "https://github.com/jgowdy/sso-jwt"
+            version "${version}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/jgowdy/sso-jwt/releases/download/${tag}/sso-jwt-aarch64-apple-darwin.tar.gz"
+                sha256 "${{ steps.sha.outputs.arm }}"
+              end
+              on_intel do
+                url "https://github.com/jgowdy/sso-jwt/releases/download/${tag}/sso-jwt-x86_64-apple-darwin.tar.gz"
+                sha256 "${{ steps.sha.outputs.intel }}"
+              end
+            end
+
+            def install
+              bin.install "sso-jwt"
+            end
+
+            def caveats
+              <<~EOS
+                Add shell integration to your profile:
+
+                  echo 'eval "\$(sso-jwt shell-init)"' >> ~/.zshrc
+
+                Usage:
+
+                  COMPANY_JWT=\$(sso-jwt) terraform apply
+              EOS
+            end
+
+            test do
+              assert_match "sso-jwt #{version}", shell_output("#{bin}/sso-jwt --version").strip
+            end
+          end
+          RUBY
+
+          sed -i 's/^          //' Formula/sso-jwt.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sso-jwt.rb
+          git commit -m "Update sso-jwt to ${version}"
+          git push
