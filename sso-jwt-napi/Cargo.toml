@@ -1,0 +1,22 @@
+[package]
+name = "sso-jwt-napi"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js native binding for sso-jwt (napi-rs)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+napi = { version = "2", features = ["tokio_rt"] }
+napi-derive = "2"
+sso-jwt-lib = { path = "../sso-jwt-lib" }
+tokio = { version = "1", features = ["rt"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[lints]
+workspace = true

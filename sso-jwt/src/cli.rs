@@ -1,10 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sso_jwt_lib::{cache, config::Config, secure_storage};
 
-use crate::cache;
-use crate::config::Config;
 use crate::exec;
-use crate::secure_storage;
 use crate::shell_init;
 
 #[derive(Parser)]
@@ -120,7 +118,7 @@ fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
         config.biometric = true;
     }
     if cli.oauth_url.is_some() {
-        config.oauth_url = cli.oauth_url.clone();
+        config.oauth_url.clone_from(&cli.oauth_url);
     }
 }
 

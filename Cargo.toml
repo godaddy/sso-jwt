@@ -1,5 +1,5 @@
 [workspace]
-members = ["sso-jwt", "sso-jwt-tpm-bridge"]
+members = ["sso-jwt", "sso-jwt-lib", "sso-jwt-napi", "sso-jwt-tpm-bridge"]
 resolver = "2"
 
 [workspace.lints.rust]
