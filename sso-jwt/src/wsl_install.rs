@@ -52,7 +52,10 @@ pub fn uninstall_from_wsl_distros() -> Result<()> {
     for distro in &distros {
         println!("  Cleaning {}...", distro.name);
         if let Err(e) = uninstall_from_distro(distro) {
-            eprintln!("    warning: could not clean WSL distro {}: {e}", distro.name);
+            eprintln!(
+                "    warning: could not clean WSL distro {}: {e}",
+                distro.name
+            );
         }
     }
     Ok(())
@@ -111,21 +114,14 @@ fn find_wsl_home(distro: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let linux_home = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let linux_home = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if linux_home.is_empty() {
         return None;
     }
 
     // Try \\wsl$\<distro>\<path> first, then \\wsl.localhost\<distro>\<path>
     for prefix in &[r"\\wsl$", r"\\wsl.localhost"] {
-        let win_path = format!(
-            r"{}\{}{}",
-            prefix,
-            distro,
-            linux_home.replace('/', r"\")
-        );
+        let win_path = format!(r"{}\{}{}", prefix, distro, linux_home.replace('/', r"\"));
         let path = PathBuf::from(&win_path);
         if path.exists() {
             return Some(path);
@@ -166,10 +162,7 @@ fn find_linux_binary() -> Result<PathBuf> {
 }
 
 /// Install sso-jwt into a single WSL distro.
-fn install_into_distro(
-    distro: &WslDistro,
-    linux_binary: &PathBuf,
-) -> Result<()> {
+fn install_into_distro(distro: &WslDistro, linux_binary: &PathBuf) -> Result<()> {
     // 1. Copy the Linux binary into the distro's ~/.local/bin/
     let local_bin = distro.home_path.join(".local").join("bin");
     std::fs::create_dir_all(&local_bin)
@@ -208,8 +201,7 @@ fn install_into_distro(
         // Create .bashrc as last resort
         let bashrc = distro.home_path.join(".bashrc");
         let content = format!("{shell_block}\n");
-        std::fs::write(&bashrc, &content)
-            .context("create .bashrc")?;
+        std::fs::write(&bashrc, &content).context("create .bashrc")?;
         println!("    Created .bashrc");
     }
 
@@ -227,11 +219,7 @@ fn uninstall_from_distro(distro: &WslDistro) -> Result<()> {
     }
 
     // Remove the binary
-    let binary = distro
-        .home_path
-        .join(".local")
-        .join("bin")
-        .join("sso-jwt");
+    let binary = distro.home_path.join(".local").join("bin").join("sso-jwt");
     if binary.exists() {
         std::fs::remove_file(&binary).ok();
         println!("    Removed ~/.local/bin/sso-jwt");
@@ -245,11 +233,7 @@ fn find_linux_home(distro: &str) -> Option<String> {
         .args(["-d", distro, "--", "echo", "$HOME"])
         .output()
         .ok()?;
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string(),
-    )
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Generate the shell block that adds ~/.local/bin to PATH and
@@ -279,11 +263,7 @@ fi
 /// 3. Syntax-check the modified file via `wsl -- bash -n` / `zsh -n`
 /// 4. Only commit the change if syntax check passes
 /// 5. If syntax check fails, leave the original untouched
-fn inject_block(
-    path: &PathBuf,
-    block: &str,
-    distro_name: &str,
-) -> Result<()> {
+fn inject_block(path: &PathBuf, block: &str, distro_name: &str) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
 
     // Already present? Idempotent no-op.
@@ -313,10 +293,7 @@ fn inject_block(
         .with_context(|| format!("write temp file {}", tmp.display()))?;
 
     // Determine the right shell for syntax checking
-    let file_name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let shell = if file_name.contains("zsh") {
         "zsh"
     } else {

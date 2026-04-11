@@ -25,17 +25,13 @@ impl TpmStorage {
 
     #[cfg(target_os = "windows")]
     fn init_windows(biometric: bool) -> Result<Self> {
-        use windows::Win32::Security::Cryptography::*;
         use windows::core::*;
+        use windows::Win32::Security::Cryptography::*;
 
         // Open the Microsoft Platform Crypto Provider (TPM)
         let mut provider = NCRYPT_PROV_HANDLE::default();
         unsafe {
-            let status = NCryptOpenStorageProvider(
-                &mut provider,
-                MS_PLATFORM_CRYPTO_PROVIDER,
-                0,
-            );
+            let status = NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0);
             if status.is_err() {
                 return Err(anyhow!(
                     "failed to open TPM provider: {status:?}. \
@@ -48,9 +44,7 @@ impl TpmStorage {
         let mut key = NCRYPT_KEY_HANDLE::default();
         let key_name: HSTRING = HSTRING::from("sso-jwt-cache-key");
 
-        let opened = unsafe {
-            NCryptOpenKey(provider, &mut key, &key_name, 0, 0)
-        };
+        let opened = unsafe { NCryptOpenKey(provider, &mut key, &key_name, 0, 0) };
 
         if opened.is_err() {
             // Key doesn't exist, create it
@@ -64,9 +58,7 @@ impl TpmStorage {
                     0,
                 );
                 if status.is_err() {
-                    return Err(anyhow!(
-                        "failed to create TPM key: {status:?}"
-                    ));
+                    return Err(anyhow!("failed to create TPM key: {status:?}"));
                 }
 
                 // If biometric, set UI policy for Windows Hello
@@ -94,9 +86,7 @@ impl TpmStorage {
 
                 let status = NCryptFinalizeKey(key, 0);
                 if status.is_err() {
-                    return Err(anyhow!(
-                        "failed to finalize TPM key: {status:?}"
-                    ));
+                    return Err(anyhow!("failed to finalize TPM key: {status:?}"));
                 }
             }
         }
@@ -157,17 +147,13 @@ impl SecureStorage for TpmStorage {
 
 #[cfg(target_os = "windows")]
 fn tpm_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
-    use windows::Win32::Security::Cryptography::*;
     use windows::core::*;
+    use windows::Win32::Security::Cryptography::*;
 
     unsafe {
         let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(
-            &mut provider,
-            MS_PLATFORM_CRYPTO_PROVIDER,
-            0,
-        )
-        .map_err(|e| anyhow!("open provider: {e}"))?;
+        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
+            .map_err(|e| anyhow!("open provider: {e}"))?;
 
         let mut key = NCRYPT_KEY_HANDLE::default();
         NCryptOpenKey(
@@ -217,17 +203,13 @@ fn tpm_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(target_os = "windows")]
 fn tpm_decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    use windows::Win32::Security::Cryptography::*;
     use windows::core::*;
+    use windows::Win32::Security::Cryptography::*;
 
     unsafe {
         let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(
-            &mut provider,
-            MS_PLATFORM_CRYPTO_PROVIDER,
-            0,
-        )
-        .map_err(|e| anyhow!("open provider: {e}"))?;
+        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
+            .map_err(|e| anyhow!("open provider: {e}"))?;
 
         let mut key = NCRYPT_KEY_HANDLE::default();
         NCryptOpenKey(
@@ -272,17 +254,13 @@ fn tpm_decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 
 #[cfg(target_os = "windows")]
 fn tpm_delete_key() -> Result<()> {
-    use windows::Win32::Security::Cryptography::*;
     use windows::core::*;
+    use windows::Win32::Security::Cryptography::*;
 
     unsafe {
         let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(
-            &mut provider,
-            MS_PLATFORM_CRYPTO_PROVIDER,
-            0,
-        )
-        .map_err(|e| anyhow!("open provider: {e}"))?;
+        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
+            .map_err(|e| anyhow!("open provider: {e}"))?;
 
         let mut key = NCRYPT_KEY_HANDLE::default();
         let result = NCryptOpenKey(
@@ -294,8 +272,7 @@ fn tpm_delete_key() -> Result<()> {
         );
 
         if result.is_ok() {
-            NCryptDeleteKey(key, 0)
-                .map_err(|e| anyhow!("delete key: {e}"))?;
+            NCryptDeleteKey(key, 0).map_err(|e| anyhow!("delete key: {e}"))?;
         }
 
         NCryptFreeObject(provider);

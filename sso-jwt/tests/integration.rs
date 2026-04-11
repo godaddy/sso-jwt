@@ -14,10 +14,7 @@ fn binary_path() -> String {
 
 #[test]
 fn cli_help_exit_zero() {
-    let output = Command::new(binary_path())
-        .arg("--help")
-        .output()
-        .unwrap();
+    let output = Command::new(binary_path()).arg("--help").output().unwrap();
     assert!(output.status.success(), "exit code: {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("hardware-backed secure caching"));
@@ -193,10 +190,7 @@ fn risk_level_0_rejected() {
         .args(["--risk-level", "0"])
         .output()
         .expect("failed to run binary");
-    assert!(
-        !output.status.success(),
-        "risk-level 0 should be rejected"
-    );
+    assert!(!output.status.success(), "risk-level 0 should be rejected");
 }
 
 #[test]
@@ -205,10 +199,7 @@ fn risk_level_4_rejected() {
         .args(["--risk-level", "4"])
         .output()
         .expect("failed to run binary");
-    assert!(
-        !output.status.success(),
-        "risk-level 4 should be rejected"
-    );
+    assert!(!output.status.success(), "risk-level 4 should be rejected");
 }
 
 #[test]

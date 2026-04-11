@@ -29,9 +29,7 @@ mod tests {
     fn empty_command_rejected() {
         let result = super::run("JWT", "token", &[]);
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("no command")
-        );
+        assert!(result.unwrap_err().to_string().contains("no command"));
     }
 
     #[test]
@@ -78,8 +76,7 @@ mod tests {
 
     #[test]
     fn nonexistent_binary_errors() {
-        let result = Command::new("this_binary_definitely_does_not_exist_xyz")
-            .output();
+        let result = Command::new("this_binary_definitely_does_not_exist_xyz").output();
         assert!(
             result.is_err(),
             "running a nonexistent binary should return an error"

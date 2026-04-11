@@ -132,9 +132,7 @@ fn handle_request_windows(req: &Request) -> Response {
 
             match tpm::encrypt(&data) {
                 Ok(encrypted) => Response {
-                    result: Some(
-                        base64::engine::general_purpose::STANDARD.encode(&encrypted),
-                    ),
+                    result: Some(base64::engine::general_purpose::STANDARD.encode(&encrypted)),
                     error: None,
                 },
                 Err(e) => Response {
@@ -164,9 +162,7 @@ fn handle_request_windows(req: &Request) -> Response {
 
             match tpm::decrypt(&data) {
                 Ok(decrypted) => Response {
-                    result: Some(
-                        base64::engine::general_purpose::STANDARD.encode(&decrypted),
-                    ),
+                    result: Some(base64::engine::general_purpose::STANDARD.encode(&decrypted)),
                     error: None,
                 },
                 Err(e) => Response {

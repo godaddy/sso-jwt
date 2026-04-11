@@ -83,14 +83,11 @@ pub fn poll_for_token(
         let resp = client
             .post(&url)
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(format!(
-                "client_id={CLIENT_ID}&device_code={device_code}"
-            ))
+            .body(format!("client_id={CLIENT_ID}&device_code={device_code}"))
             .send()
             .context("failed to poll for token")?;
 
-        let poll: TokenPollResponse =
-            resp.json().context("failed to parse token poll response")?;
+        let poll: TokenPollResponse = resp.json().context("failed to parse token poll response")?;
 
         if let Some(token) = poll.access_token {
             return Ok(token);
@@ -108,9 +105,7 @@ pub fn poll_for_token(
                 return Err(anyhow!("authorization failed: {error}"));
             }
             None => {
-                return Err(anyhow!(
-                    "unexpected response: no access_token and no error"
-                ));
+                return Err(anyhow!("unexpected response: no access_token and no error"));
             }
         }
     }
@@ -137,9 +132,7 @@ pub fn open_browser(uri: &str) -> Result<()> {
                 std::process::Command::new(&browser)
                     .arg(uri)
                     .spawn()
-                    .with_context(|| {
-                        format!("failed to open browser via $BROWSER ({browser})")
-                    })?;
+                    .with_context(|| format!("failed to open browser via $BROWSER ({browser})"))?;
                 Ok(())
             } else {
                 Err(e).context("failed to open browser")
@@ -151,10 +144,7 @@ pub fn open_browser(uri: &str) -> Result<()> {
 /// Run the full OAuth Device Code flow: request code, prompt user,
 /// poll for token.
 #[allow(clippy::print_stderr)]
-pub fn authenticate(
-    oauth_url: &str,
-    auto_open: bool,
-) -> Result<String> {
+pub fn authenticate(oauth_url: &str, auto_open: bool) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -170,22 +160,14 @@ pub fn authenticate(
             }
             Err(e) => {
                 eprintln!("Could not open browser: {e}");
-                eprintln!(
-                    "Please open {} in your web browser.",
-                    code.verification_uri
-                );
+                eprintln!("Please open {} in your web browser.", code.verification_uri);
             }
         }
     } else {
-        eprintln!(
-            "Please open {} in your web browser.",
-            code.verification_uri
-        );
+        eprintln!("Please open {} in your web browser.", code.verification_uri);
     }
 
-    eprintln!(
-        "When prompted, confirm or enter this code: {formatted_code}"
-    );
+    eprintln!("When prompted, confirm or enter this code: {formatted_code}");
 
     poll_for_token(
         &client,
@@ -198,10 +180,7 @@ pub fn authenticate(
 
 /// Attempt to refresh a token via the SSO heartbeat endpoint.
 /// Returns the new token on success, or None on failure.
-pub fn heartbeat_refresh(
-    sso_url: &str,
-    token: &str,
-) -> Option<String> {
+pub fn heartbeat_refresh(sso_url: &str, token: &str) -> Option<String> {
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -327,8 +306,7 @@ mod tests {
             data: Option<String>,
         }
         let json = r#"{"data":"new-token-value"}"#;
-        let resp: HeartbeatResponse =
-            serde_json::from_str(json).expect("valid heartbeat JSON");
+        let resp: HeartbeatResponse = serde_json::from_str(json).expect("valid heartbeat JSON");
         assert_eq!(resp.data.as_deref(), Some("new-token-value"));
     }
 
@@ -349,8 +327,7 @@ mod tests {
         // When both access_token and error are present, the code checks
         // access_token first via `if let Some(token) = poll.access_token`
         let json = r#"{"access_token":"my-token","error":"some_error"}"#;
-        let resp: TokenPollResponse =
-            serde_json::from_str(json).expect("valid poll JSON");
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid poll JSON");
         assert_eq!(resp.access_token.as_deref(), Some("my-token"));
         assert_eq!(resp.error.as_deref(), Some("some_error"));
     }
@@ -392,8 +369,7 @@ mod tests {
     #[test]
     fn parse_token_poll_slow_down() {
         let json = r#"{"error":"slow_down"}"#;
-        let resp: TokenPollResponse =
-            serde_json::from_str(json).expect("valid slow_down JSON");
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid slow_down JSON");
         assert!(resp.access_token.is_none());
         assert_eq!(resp.error.as_deref(), Some("slow_down"));
     }
@@ -401,8 +377,7 @@ mod tests {
     #[test]
     fn parse_token_poll_access_denied() {
         let json = r#"{"error":"access_denied"}"#;
-        let resp: TokenPollResponse =
-            serde_json::from_str(json).expect("valid access_denied JSON");
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid access_denied JSON");
         assert!(resp.access_token.is_none());
         assert_eq!(resp.error.as_deref(), Some("access_denied"));
     }
