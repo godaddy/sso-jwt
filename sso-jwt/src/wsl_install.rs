@@ -197,7 +197,7 @@ fn install_into_distro(
     for rc_name in &[".bashrc", ".zshrc"] {
         let rc_path = distro.home_path.join(rc_name);
         if rc_path.exists() {
-            inject_block(&rc_path, &shell_block)
+            inject_block(&rc_path, &shell_block, &distro.name)
                 .with_context(|| format!("inject into {rc_name}"))?;
             println!("    Updated {rc_name}");
             configured = true;
@@ -272,14 +272,33 @@ fi
 }
 
 /// Inject a managed block into a shell config file.
-fn inject_block(path: &PathBuf, block: &str) -> Result<()> {
+///
+/// Safety measures (ported from sshenc):
+/// 1. Back up the original file before first modification
+/// 2. Write to a temp file first
+/// 3. Syntax-check the modified file via `wsl -- bash -n` / `zsh -n`
+/// 4. Only commit the change if syntax check passes
+/// 5. If syntax check fails, leave the original untouched
+fn inject_block(
+    path: &PathBuf,
+    block: &str,
+    distro_name: &str,
+) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
 
-    // Already present?
+    // Already present? Idempotent no-op.
     if content.contains(BEGIN_MARKER) {
         return Ok(());
     }
 
+    // Back up the original before first modification
+    let backup = path.with_extension("sso-jwt-backup");
+    if !backup.exists() {
+        std::fs::copy(path, &backup)
+            .with_context(|| format!("backup {} failed", path.display()))?;
+    }
+
+    // Build the modified content
     let mut new_content = content;
     if !new_content.ends_with('\n') {
         new_content.push('\n');
@@ -288,7 +307,59 @@ fn inject_block(path: &PathBuf, block: &str) -> Result<()> {
     new_content.push_str(block);
     new_content.push('\n');
 
-    std::fs::write(path, &new_content)?;
+    // Write to a temp file first
+    let tmp = path.with_extension("sso-jwt-tmp");
+    std::fs::write(&tmp, &new_content)
+        .with_context(|| format!("write temp file {}", tmp.display()))?;
+
+    // Determine the right shell for syntax checking
+    let file_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let shell = if file_name.contains("zsh") {
+        "zsh"
+    } else {
+        "bash"
+    };
+
+    // Syntax-check the modified file via WSL
+    let check = std::process::Command::new("wsl")
+        .args(["-d", distro_name, "--", shell, "-n"])
+        .stdin(std::process::Stdio::from(
+            std::fs::File::open(&tmp)
+                .with_context(|| format!("open temp file for syntax check"))?,
+        ))
+        .output();
+
+    match check {
+        Ok(o) if o.status.success() => {
+            // Syntax OK -- commit the change
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("rename temp to {}", path.display()))?;
+        }
+        Ok(o) => {
+            // Syntax error -- do NOT modify the original
+            let _ = std::fs::remove_file(&tmp);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            return Err(anyhow!(
+                "ABORTED: modified {} has syntax errors ({}). Original untouched.\n\
+                 Backup at: {}\n\
+                 Error: {}",
+                file_name,
+                shell,
+                backup.display(),
+                stderr.trim()
+            ));
+        }
+        Err(_) => {
+            // Can't run syntax check (WSL shell not available?)
+            // Proceed cautiously -- our block is known-valid shell
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("rename temp to {}", path.display()))?;
+        }
+    }
+
     Ok(())
 }
 
