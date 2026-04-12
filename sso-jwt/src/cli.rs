@@ -75,14 +75,18 @@ pub enum Commands {
     /// Uninstall sso-jwt configuration (on Windows, also remove from WSL distros)
     Uninstall,
 
-    /// Add a server profile from a URL or local file
+    /// Add a server profile from a URL, GitHub repo, or local file
     AddServer {
         /// Label for this server profile
         label: String,
 
         /// URL or local path to fetch the server configuration from
-        #[arg(long)]
-        from_url: String,
+        #[arg(long, group = "source")]
+        from_url: Option<String>,
+
+        /// GitHub repo path: owner/repo/file.toml (fetches via GitHub API)
+        #[arg(long, group = "source")]
+        from_github: Option<String>,
 
         /// Set this server as the default
         #[arg(long)]
@@ -113,10 +117,13 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::AddServer {
             ref label,
             ref from_url,
+            ref from_github,
             default: set_default,
             force,
         }) => {
-            return run_add_server(label, from_url, *set_default, *force);
+            let source = from_url.as_deref().or(from_github.as_deref());
+            let is_github = from_github.is_some();
+            return run_add_server(label, source, is_github, *set_default, *force);
         }
         _ => {}
     }
@@ -194,24 +201,65 @@ fn run_uninstall() -> Result<()> {
 }
 
 #[allow(clippy::print_stderr)]
-fn run_add_server(label: &str, from_url: &str, set_default: bool, force: bool) -> Result<()> {
-    let toml_content = if from_url.starts_with("http://") || from_url.starts_with("https://") {
-        let resp = reqwest::blocking::get(from_url)?;
+fn run_add_server(
+    label: &str,
+    source: Option<&str>,
+    is_github: bool,
+    set_default: bool,
+    force: bool,
+) -> Result<()> {
+    let source = source.ok_or_else(|| anyhow::anyhow!("specify --from-url or --from-github"))?;
+
+    let (toml_content, display_source) = if is_github {
+        // Parse owner/repo/path format
+        let parts: Vec<&str> = source.splitn(3, '/').collect();
+        if parts.len() < 3 {
+            bail!("--from-github format: owner/repo/path (e.g. myorg/sso-jwt-config/server.toml)");
+        }
+        let (owner, repo, path) = (parts[0], parts[1], parts[2]);
+
+        // Use GitHub API with auth from `gh auth token` if available
+        let api_url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
+        let gh_token = std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let client = reqwest::blocking::Client::new();
+        let mut req = client
+            .get(&api_url)
+            .header("Accept", "application/vnd.github.raw+json")
+            .header("User-Agent", "sso-jwt");
+        if let Some(ref token) = gh_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = req.send()?;
+
         if !resp.status().is_success() {
             bail!(
-                "failed to fetch server config from {}: HTTP {}",
-                from_url,
+                "failed to fetch from GitHub {owner}/{repo}/{path}: HTTP {}",
                 resp.status()
             );
         }
-        resp.text()?
+        (resp.text()?, format!("github:{source}"))
+    } else if source.starts_with("http://") || source.starts_with("https://") {
+        let resp = reqwest::blocking::get(source)?;
+        if !resp.status().is_success() {
+            bail!(
+                "failed to fetch server config from {source}: HTTP {}",
+                resp.status()
+            );
+        }
+        (resp.text()?, source.to_string())
     } else {
-        std::fs::read_to_string(from_url)?
+        (std::fs::read_to_string(source)?, source.to_string())
     };
 
     Config::add_server_from_toml(label, &toml_content, set_default, force)?;
 
-    eprintln!("Added server '{label}' from {from_url}");
+    eprintln!("Added server '{label}' from {display_source}");
     if set_default {
         eprintln!("Set '{label}' as the default server.");
     }
