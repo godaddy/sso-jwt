@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -26,28 +26,27 @@ pub struct Config {
 }
 
 /// On-disk TOML configuration (all fields optional).
-#[derive(Debug, Deserialize, Default)]
-struct FileConfig {
-    default_server: Option<String>,
-    risk_level: Option<u8>,
-    biometric: Option<bool>,
-    cache_name: Option<String>,
-    servers: Option<HashMap<String, ServerFileConfig>>,
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct FileConfig {
+    pub default_server: Option<String>,
+    pub risk_level: Option<u8>,
+    pub biometric: Option<bool>,
+    pub cache_name: Option<String>,
+    pub servers: Option<HashMap<String, ServerFileConfig>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ServerFileConfig {
-    oauth_url: String,
-    heartbeat_url: Option<String>,
-    client_id: Option<String>,
-    env_var: Option<String>,
-    environments: Option<HashMap<String, EnvironmentFileConfig>>,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerFileConfig {
+    pub client_id: Option<String>,
+    pub env_var: Option<String>,
+    pub environments: Option<HashMap<String, EnvironmentFileConfig>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct EnvironmentFileConfig {
-    oauth_url: Option<String>,
-    heartbeat_url: Option<String>,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EnvironmentFileConfig {
+    pub default: Option<bool>,
+    pub oauth_url: Option<String>,
+    pub heartbeat_url: Option<String>,
 }
 
 impl Config {
@@ -116,8 +115,9 @@ impl Config {
     /// "direct URL mode" and server resolution is skipped.
     ///
     /// Otherwise, looks up `self.server` in the file config's servers map,
-    /// applies server-level settings, and then applies environment overrides
-    /// if `self.environment` is set.
+    /// picks the environment (explicit name, or the one marked `default = true`),
+    /// and pulls `oauth_url` / `heartbeat_url` from that environment.
+    /// `client_id` and `env_var` come from the server level.
     pub fn resolve_server(&mut self) -> Result<()> {
         // Direct URL mode: oauth_url already set, skip server resolution
         if !self.oauth_url.is_empty() {
@@ -143,8 +143,7 @@ impl Config {
             }
         };
 
-        self.oauth_url = server_config.oauth_url.clone();
-        self.heartbeat_url = server_config.heartbeat_url.clone();
+        // Apply server-level settings
         if let Some(ref cid) = server_config.client_id {
             self.client_id = cid.clone();
         }
@@ -152,19 +151,56 @@ impl Config {
             self.env_var = ev.clone();
         }
 
-        // Apply environment overrides if set
-        if let Some(ref env_name) = self.environment {
-            if let Some(ref envs) = server_config.environments {
-                if let Some(env_config) = envs.get(env_name) {
-                    if let Some(ref url) = env_config.oauth_url {
-                        self.oauth_url = url.clone();
-                    }
-                    if let Some(ref url) = env_config.heartbeat_url {
-                        self.heartbeat_url = Some(url.clone());
-                    }
+        // Resolve the environment
+        let envs = match server_config.environments {
+            Some(ref e) if !e.is_empty() => e,
+            _ => {
+                bail!(
+                    "server '{}' has no environments configured. Add at least one environment with an oauth_url.",
+                    self.server
+                );
+            }
+        };
+
+        let (env_name, env_config) = if let Some(ref requested) = self.environment {
+            // Explicit environment requested
+            match envs.get(requested.as_str()) {
+                Some(ec) => (requested.clone(), ec),
+                None => {
+                    bail!(
+                        "environment '{}' not found in server '{}'. Available: {}",
+                        requested,
+                        self.server,
+                        envs.keys().cloned().collect::<Vec<_>>().join(", ")
+                    );
                 }
             }
+        } else {
+            // Find the default environment
+            let default_env = envs.iter().find(|(_, ec)| ec.default == Some(true));
+            match default_env {
+                Some((name, ec)) => (name.clone(), ec),
+                None => {
+                    bail!(
+                        "no default environment for server '{}'. Set default = true on one environment, or use --environment.",
+                        self.server
+                    );
+                }
+            }
+        };
+
+        // Set the environment name so cache paths are scoped correctly
+        if self.environment.is_none() {
+            self.environment = Some(env_name);
         }
+
+        self.oauth_url = match env_config.oauth_url {
+            Some(ref url) => url.clone(),
+            None => {
+                bail!("oauth_url is required on the environment but is missing");
+            }
+        };
+        self.heartbeat_url = env_config.heartbeat_url.clone();
 
         Ok(())
     }
@@ -227,6 +263,55 @@ impl Config {
         let content = std::fs::read_to_string(path)?;
         let config: FileConfig = toml::from_str(&content)?;
         Ok(config)
+    }
+
+    /// Load the on-disk file config, returning defaults if the file is missing.
+    pub fn load_file_config_public() -> FileConfig {
+        Self::load_file_config().unwrap_or_default()
+    }
+
+    /// Write a `FileConfig` back to the config file as TOML.
+    pub fn save_file_config(fc: &FileConfig) -> Result<()> {
+        let path = Self::config_file_path();
+        let dir = Self::config_dir();
+        std::fs::create_dir_all(&dir)?;
+        let content = toml::to_string_pretty(fc)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Add a server from a TOML string (the flat remote config format).
+    ///
+    /// Parses `toml_content` as a `ServerFileConfig`, merges it into the
+    /// existing file config under the given `label`, optionally sets
+    /// `default_server`, and saves.
+    pub fn add_server_from_toml(
+        label: &str,
+        toml_content: &str,
+        set_default: bool,
+        force: bool,
+    ) -> Result<()> {
+        let server_config: ServerFileConfig = toml::from_str(toml_content)?;
+
+        let mut fc = Self::load_file_config_public();
+        let servers = fc.servers.get_or_insert_with(HashMap::new);
+
+        if servers.contains_key(label) && !force {
+            bail!(
+                "server '{}' already exists. Use --force to overwrite.",
+                label
+            );
+        }
+
+        let is_first = servers.is_empty();
+        servers.insert(label.to_string(), server_config);
+
+        if set_default || is_first {
+            fc.default_server = Some(label.to_string());
+        }
+
+        Self::save_file_config(&fc)?;
+        Ok(())
     }
 }
 
@@ -337,16 +422,22 @@ biometric = true
 cache_name = "work"
 
 [servers.myco]
-oauth_url = "https://auth.myco.com/device"
-heartbeat_url = "https://auth.myco.com/heartbeat"
 client_id = "myco-client"
 env_var = "MYCO_JWT"
+
+[servers.myco.environments.prod]
+default = true
+oauth_url = "https://auth.myco.com/device"
+heartbeat_url = "https://auth.myco.com/heartbeat"
 
 [servers.myco.environments.dev]
 oauth_url = "https://auth.dev.myco.com/device"
 heartbeat_url = "https://auth.dev.myco.com/heartbeat"
 
 [servers.other]
+
+[servers.other.environments.prod]
+default = true
 oauth_url = "https://other.example.com/oauth"
 "#;
         let fc: FileConfig = toml::from_str(toml_str).expect("valid TOML");
@@ -359,15 +450,21 @@ oauth_url = "https://other.example.com/oauth"
         assert_eq!(servers.len(), 2);
 
         let myco = servers.get("myco").expect("myco server should exist");
-        assert_eq!(myco.oauth_url, "https://auth.myco.com/device");
-        assert_eq!(
-            myco.heartbeat_url.as_deref(),
-            Some("https://auth.myco.com/heartbeat")
-        );
         assert_eq!(myco.client_id.as_deref(), Some("myco-client"));
         assert_eq!(myco.env_var.as_deref(), Some("MYCO_JWT"));
 
         let envs = myco.environments.as_ref().expect("environments present");
+        let prod = envs.get("prod").expect("prod environment");
+        assert_eq!(prod.default, Some(true));
+        assert_eq!(
+            prod.oauth_url.as_deref(),
+            Some("https://auth.myco.com/device")
+        );
+        assert_eq!(
+            prod.heartbeat_url.as_deref(),
+            Some("https://auth.myco.com/heartbeat")
+        );
+
         let dev = envs.get("dev").expect("dev environment");
         assert_eq!(
             dev.oauth_url.as_deref(),
@@ -379,9 +476,13 @@ oauth_url = "https://other.example.com/oauth"
         );
 
         let other = servers.get("other").expect("other server should exist");
-        assert_eq!(other.oauth_url, "https://other.example.com/oauth");
-        assert!(other.heartbeat_url.is_none());
         assert!(other.client_id.is_none());
+        let other_envs = other.environments.as_ref().expect("other envs present");
+        let other_prod = other_envs.get("prod").expect("other prod env");
+        assert_eq!(
+            other_prod.oauth_url.as_deref(),
+            Some("https://other.example.com/oauth")
+        );
     }
 
     #[test]
@@ -641,16 +742,25 @@ another_unknown = 42
 default_server = "alpha"
 
 [servers.alpha]
-oauth_url = "https://alpha.example.com/oauth"
 client_id = "alpha-id"
 
+[servers.alpha.environments.prod]
+default = true
+oauth_url = "https://alpha.example.com/oauth"
+
 [servers.beta]
-oauth_url = "https://beta.example.com/oauth"
-heartbeat_url = "https://beta.example.com/heartbeat"
 client_id = "beta-id"
 env_var = "BETA_TOKEN"
 
+[servers.beta.environments.prod]
+default = true
+oauth_url = "https://beta.example.com/oauth"
+heartbeat_url = "https://beta.example.com/heartbeat"
+
 [servers.gamma]
+
+[servers.gamma.environments.prod]
+default = true
 oauth_url = "https://gamma.example.com/oauth"
 
 [servers.gamma.environments.staging]

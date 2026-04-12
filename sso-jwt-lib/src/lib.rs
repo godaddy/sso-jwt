@@ -4,7 +4,7 @@ pub mod jwt;
 pub mod oauth;
 pub mod secure_storage;
 
-pub use config::Config;
+pub use config::{Config, EnvironmentFileConfig, FileConfig, ServerFileConfig};
 
 /// Options for obtaining a JWT, matching the Node.js `getJwt` contract.
 #[derive(Debug, Clone, Default)]

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sso_jwt_lib::{cache, config::Config, secure_storage};
 
@@ -74,6 +74,24 @@ pub enum Commands {
 
     /// Uninstall sso-jwt configuration (on Windows, also remove from WSL distros)
     Uninstall,
+
+    /// Add a server profile from a URL or local file
+    AddServer {
+        /// Label for this server profile
+        label: String,
+
+        /// URL or local path to fetch the server configuration from
+        #[arg(long)]
+        from_url: String,
+
+        /// Set this server as the default
+        #[arg(long)]
+        default: bool,
+
+        /// Overwrite existing server with the same label
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
@@ -91,6 +109,14 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Some(Commands::Uninstall) => {
             return run_uninstall();
+        }
+        Some(Commands::AddServer {
+            ref label,
+            ref from_url,
+            default: set_default,
+            force,
+        }) => {
+            return run_add_server(label, from_url, *set_default, *force);
         }
         _ => {}
     }
@@ -164,6 +190,31 @@ fn run_uninstall() -> Result<()> {
         eprintln!("Remove the sso-jwt shell-init line from your shell profile.");
     }
 
+    Ok(())
+}
+
+#[allow(clippy::print_stderr)]
+fn run_add_server(label: &str, from_url: &str, set_default: bool, force: bool) -> Result<()> {
+    let toml_content = if from_url.starts_with("http://") || from_url.starts_with("https://") {
+        let resp = reqwest::blocking::get(from_url)?;
+        if !resp.status().is_success() {
+            bail!(
+                "failed to fetch server config from {}: HTTP {}",
+                from_url,
+                resp.status()
+            );
+        }
+        resp.text()?
+    } else {
+        std::fs::read_to_string(from_url)?
+    };
+
+    Config::add_server_from_toml(label, &toml_content, set_default, force)?;
+
+    eprintln!("Added server '{label}' from {from_url}");
+    if set_default {
+        eprintln!("Set '{label}' as the default server.");
+    }
     Ok(())
 }
 
