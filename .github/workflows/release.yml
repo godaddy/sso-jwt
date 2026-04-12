@@ -9,17 +9,13 @@ jobs:
     uses: jgowdy/libenclaveapp/.github/workflows/reusable-release.yml@main
     with:
       app_name: sso-jwt
-      targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]'
+      targets: '["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]'
       linux_deps: "libdbus-1-dev pkg-config"
       unix_binaries: "sso-jwt"
       windows_binaries: "sso-jwt.exe sso-jwt-tpm-bridge.exe"
       wix_file: "installer/sso-jwt.wxs"
-      homebrew_tap_repo: "jgowdy/homebrew-sso-jwt"
-      homebrew_formula_class: "SsoJwt"
-      homebrew_description: "SSO JWT CLI with hardware-backed secure caching"
-      scoop_bucket_repo: "jgowdy/scoop-sso-jwt"
-      scoop_description: "SSO JWT with hardware-backed caching (Windows TPM 2.0)"
-      has_winget: true
+      homebrew: '{"tap_repo":"jgowdy/homebrew-sso-jwt","formula_class":"SsoJwt","description":"SSO JWT CLI with hardware-backed secure caching"}'
+      scoop: '{"bucket_repo":"jgowdy/scoop-sso-jwt","description":"SSO JWT with hardware-backed caching (Windows TPM 2.0)","has_winget":true}'
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
