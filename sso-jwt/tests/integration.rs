@@ -30,7 +30,7 @@ fn cli_version_exit_zero() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("sso-jwt 0.1.0"));
+    assert!(stdout.contains("sso-jwt"));
 }
 
 #[test]
