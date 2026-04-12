@@ -1,194 +1,95 @@
-//! TPM 2.0 operations via Windows CNG.
-//! This module is only compiled on Windows.
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
 
-#![cfg(target_os = "windows")]
+//! TPM 2.0 storage operations via libenclaveapp.
+//!
+//! On Windows, this uses `enclaveapp-windows::TpmEncryptor` to perform
+//! hardware-backed ECIES encryption via the Windows CNG/NCrypt APIs.
+//!
+//! On non-Windows platforms, all operations return an error at runtime.
 
-use anyhow::{anyhow, Result};
-use windows::core::HSTRING;
-use windows::Win32::Security::Cryptography::*;
+#[cfg(target_os = "windows")]
+mod platform {
+    use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+    use enclaveapp_core::types::{AccessPolicy, KeyType};
+    use enclaveapp_windows::TpmEncryptor;
 
-const KEY_NAME: &str = "sso-jwt-cache-key";
+    /// Application name for key namespacing.
+    const APP_NAME: &str = "sso-jwt";
 
-/// Ensure the TPM key exists, creating it if necessary.
-pub fn ensure_key(biometric: bool) -> Result<()> {
-    unsafe {
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0).map_err(|e| {
-            anyhow!(
-                "failed to open TPM provider: {e}. \
-                 This machine may not have a TPM 2.0 module."
-            )
-        })?;
+    /// Key label for the TPM bridge encryption key.
+    const KEY_LABEL: &str = "cache-key";
 
-        let key_name = HSTRING::from(KEY_NAME);
-        let mut key = NCRYPT_KEY_HANDLE::default();
+    pub struct TpmStorage {
+        encryptor: TpmEncryptor,
+        #[allow(dead_code)]
+        biometric: bool,
+    }
 
-        let opened = NCryptOpenKey(
-            provider,
-            &mut key,
-            &key_name,
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        );
+    impl TpmStorage {
+        pub fn new(biometric: bool) -> Result<Self, String> {
+            let encryptor = TpmEncryptor::new(APP_NAME);
 
-        if opened.is_ok() {
-            // Key exists
-            NCryptFreeObject(key);
-            NCryptFreeObject(provider);
-            return Ok(());
+            if !encryptor.is_available() {
+                return Err("TPM not available".to_string());
+            }
+
+            // Ensure the key exists; generate if missing.
+            if encryptor.public_key(KEY_LABEL).is_err() {
+                let policy = if biometric {
+                    AccessPolicy::BiometricOnly
+                } else {
+                    AccessPolicy::None
+                };
+                encryptor
+                    .generate(KEY_LABEL, KeyType::Encryption, policy)
+                    .map_err(|e| format!("key generation failed: {e}"))?;
+            }
+
+            Ok(Self {
+                encryptor,
+                biometric,
+            })
         }
 
-        // Create new key
-        NCryptCreatePersistedKey(
-            provider,
-            &mut key,
-            BCRYPT_ECDH_P256_ALGORITHM,
-            &key_name,
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        )
-        .map_err(|e| anyhow!("failed to create TPM key: {e}"))?;
-
-        if biometric {
-            let policy = NCRYPT_UI_POLICY {
-                dwVersion: 1,
-                dwFlags: NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG,
-                pszCreationTitle: windows::core::PCWSTR::null(),
-                pszFriendlyName: windows::core::PCWSTR::null(),
-                pszDescription: windows::core::PCWSTR::null(),
-            };
-            let _ = NCryptSetProperty(
-                key,
-                NCRYPT_UI_POLICY_PROPERTY,
-                std::slice::from_raw_parts(
-                    &policy as *const _ as *const u8,
-                    size_of::<NCRYPT_UI_POLICY>(),
-                ),
-                NCRYPT_PERSIST_FLAG,
-            );
+        pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            self.encryptor
+                .encrypt(KEY_LABEL, plaintext)
+                .map_err(|e| e.to_string())
         }
 
-        NCryptFinalizeKey(key, NCRYPT_FLAGS::default())
-            .map_err(|e| anyhow!("failed to finalize TPM key: {e}"))?;
-
-        NCryptFreeObject(key);
-        NCryptFreeObject(provider);
-        Ok(())
+        pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+            self.encryptor
+                .decrypt(KEY_LABEL, ciphertext)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
-/// Encrypt data using the TPM-bound key.
-pub fn encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
-    unsafe {
-        let (provider, key) = open_key()?;
-
-        let mut output_size: u32 = 0;
-        NCryptEncrypt(
-            key,
-            Some(plaintext),
-            None,
-            None,
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("encrypt size query: {e}"))?;
-
-        let mut output = vec![0u8; output_size as usize];
-        NCryptEncrypt(
-            key,
-            Some(plaintext),
-            None,
-            Some(&mut output),
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("encrypt: {e}"))?;
-
-        output.truncate(output_size as usize);
-
-        NCryptFreeObject(key);
-        NCryptFreeObject(provider);
-        Ok(output)
+#[cfg(not(target_os = "windows"))]
+mod platform {
+    pub struct TpmStorage {
+        _biometric: bool,
     }
-}
 
-/// Decrypt data using the TPM-bound key.
-pub fn decrypt(ciphertext: &[u8]) -> Result<Vec<u8>> {
-    unsafe {
-        let (provider, key) = open_key()?;
-
-        let mut output_size: u32 = 0;
-        NCryptDecrypt(
-            key,
-            Some(ciphertext),
-            None,
-            None,
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("decrypt size query: {e}"))?;
-
-        let mut output = vec![0u8; output_size as usize];
-        NCryptDecrypt(
-            key,
-            Some(ciphertext),
-            None,
-            Some(&mut output),
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("decrypt: {e}"))?;
-
-        output.truncate(output_size as usize);
-
-        NCryptFreeObject(key);
-        NCryptFreeObject(provider);
-        Ok(output)
-    }
-}
-
-/// Delete the TPM-bound key.
-pub fn destroy() -> Result<()> {
-    unsafe {
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
-            .map_err(|e| anyhow!("open provider: {e}"))?;
-
-        let mut key = NCRYPT_KEY_HANDLE::default();
-        let result = NCryptOpenKey(
-            provider,
-            &mut key,
-            &HSTRING::from(KEY_NAME),
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        );
-
-        if result.is_ok() {
-            NCryptDeleteKey(key, 0).map_err(|e| anyhow!("delete key: {e}"))?;
+    impl TpmStorage {
+        #[allow(clippy::unnecessary_wraps)]
+        pub fn new(biometric: bool) -> Result<Self, String> {
+            Ok(Self {
+                _biometric: biometric,
+            })
         }
 
-        NCryptFreeObject(provider);
-        Ok(())
+        #[allow(clippy::unused_self)]
+        pub fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            Err("TPM bridge is only supported on Windows".to_string())
+        }
+
+        #[allow(clippy::unused_self)]
+        pub fn decrypt(&self, _ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+            Err("TPM bridge is only supported on Windows".to_string())
+        }
     }
 }
 
-unsafe fn open_key() -> Result<(NCRYPT_PROV_HANDLE, NCRYPT_KEY_HANDLE)> {
-    let mut provider = NCRYPT_PROV_HANDLE::default();
-    NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
-        .map_err(|e| anyhow!("open provider: {e}"))?;
-
-    let mut key = NCRYPT_KEY_HANDLE::default();
-    NCryptOpenKey(
-        provider,
-        &mut key,
-        &HSTRING::from(KEY_NAME),
-        CERT_KEY_SPEC(0),
-        NCRYPT_FLAGS::default(),
-    )
-    .map_err(|e| {
-        NCryptFreeObject(provider);
-        anyhow!("open key: {e}. Run 'sso-jwt' once to create the key.")
-    })?;
-
-    Ok((provider, key))
-}
+pub use platform::TpmStorage;

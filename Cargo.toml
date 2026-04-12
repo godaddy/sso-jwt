@@ -2,6 +2,13 @@
 members = ["sso-jwt", "sso-jwt-lib", "sso-jwt-napi", "sso-jwt-tpm-bridge"]
 resolver = "2"
 
+[workspace.dependencies]
+enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
+enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple" }
+enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows" }
+enclaveapp-bridge = { path = "../libenclaveapp/crates/enclaveapp-bridge" }
+enclaveapp-wsl = { path = "../libenclaveapp/crates/enclaveapp-wsl" }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }

@@ -21,21 +21,9 @@ pub trait SecureStorage: Send + Sync {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 mod macos;
 
-// TODO: Windows lint suppression should be tightened once tested on a Windows machine.
-// These lints fire on CNG FFI code that can't be verified from macOS/Linux.
 #[cfg(target_os = "windows")]
-#[allow(
-    unsafe_code,
-    clippy::ptr_as_ptr,
-    clippy::print_stderr,
-    clippy::unseparated_literal_suffix,
-    trivial_casts,
-    unused_must_use,
-    unused_qualifications
-)]
 mod windows;
 
 #[cfg(target_os = "linux")]

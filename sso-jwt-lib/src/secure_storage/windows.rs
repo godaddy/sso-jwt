@@ -1,11 +1,25 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Windows TPM 2.0 storage backed by libenclaveapp's CNG encryptor.
+
 use anyhow::{anyhow, Result};
 use zeroize::Zeroizing;
 
 use super::SecureStorage;
 
+/// Application name used to namespace keys in libenclaveapp.
+const APP_NAME: &str = "sso-jwt";
+
+/// Key label used for the credential encryption key.
+const KEY_LABEL: &str = "cache-key";
+
 /// TPM 2.0 storage backend for Windows.
-/// Uses CNG (Cryptography Next Generation) via the Microsoft Platform Crypto Provider.
+/// Uses libenclaveapp's `TpmEncryptor` for hardware-backed ECIES encryption.
 pub struct TpmStorage {
+    #[cfg(target_os = "windows")]
+    encryptor: enclaveapp_windows::TpmEncryptor,
+    #[cfg(not(target_os = "windows"))]
     _biometric: bool,
 }
 
@@ -19,97 +33,31 @@ impl TpmStorage {
 
         #[cfg(target_os = "windows")]
         {
-            Self::init_windows(biometric)
-        }
-    }
+            use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+            use enclaveapp_core::types::{AccessPolicy, KeyType};
 
-    #[cfg(target_os = "windows")]
-    fn init_windows(biometric: bool) -> Result<Self> {
-        use windows::core::*;
-        use windows::Win32::Security::Cryptography::*;
+            let encryptor = enclaveapp_windows::TpmEncryptor::new(APP_NAME);
 
-        // Open the Microsoft Platform Crypto Provider (TPM)
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        unsafe {
-            let status = NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0);
-            if status.is_err() {
+            if !encryptor.is_available() {
                 return Err(anyhow!(
-                    "failed to open TPM provider: {status:?}. \
-                     This machine may not have a TPM 2.0 module."
+                    "TPM not available. This machine may not have a TPM 2.0 module."
                 ));
             }
-        }
 
-        // Try to open existing key, create if not found
-        let mut key = NCRYPT_KEY_HANDLE::default();
-        let key_name: HSTRING = HSTRING::from("sso-jwt-cache-key");
-
-        let opened = unsafe {
-            NCryptOpenKey(
-                provider,
-                &mut key,
-                &key_name,
-                CERT_KEY_SPEC(0),
-                NCRYPT_FLAGS::default(),
-            )
-        };
-
-        if opened.is_err() {
-            // Key doesn't exist, create it
-            unsafe {
-                let status = NCryptCreatePersistedKey(
-                    provider,
-                    &mut key,
-                    BCRYPT_ECDH_P256_ALGORITHM,
-                    &key_name,
-                    CERT_KEY_SPEC(0),
-                    NCRYPT_FLAGS::default(),
-                );
-                if status.is_err() {
-                    return Err(anyhow!("failed to create TPM key: {status:?}"));
-                }
-
-                // If biometric, set UI policy for Windows Hello
-                if biometric {
-                    let policy = NCRYPT_UI_POLICY {
-                        dwVersion: 1,
-                        dwFlags: NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG,
-                        pszCreationTitle: PCWSTR::null(),
-                        pszFriendlyName: PCWSTR::null(),
-                        pszDescription: PCWSTR::null(),
-                    };
-                    let status = NCryptSetProperty(
-                        key,
-                        NCRYPT_UI_POLICY_PROPERTY,
-                        std::slice::from_raw_parts(
-                            &policy as *const _ as *const u8,
-                            size_of::<NCRYPT_UI_POLICY>(),
-                        ),
-                        NCRYPT_PERSIST_FLAG,
-                    );
-                    if status.is_err() {
-                        eprintln!("warning: failed to set biometric policy: {status:?}");
-                    }
-                }
-
-                let status = NCryptFinalizeKey(key, NCRYPT_FLAGS::default());
-                if status.is_err() {
-                    return Err(anyhow!("failed to finalize TPM key: {status:?}"));
-                }
+            // Ensure the key exists; generate if missing.
+            if encryptor.public_key(KEY_LABEL).is_err() {
+                let policy = if biometric {
+                    AccessPolicy::BiometricOnly
+                } else {
+                    AccessPolicy::None
+                };
+                encryptor
+                    .generate(KEY_LABEL, KeyType::Encryption, policy)
+                    .map_err(|e| anyhow!("failed to create TPM key: {e}"))?;
             }
-        }
 
-        // We close handles here and re-open per operation.
-        // In a production implementation, we'd hold the handles and
-        // implement Drop. For now we store the flag and re-acquire.
-        unsafe {
-            NCryptFreeObject(key);
-            NCryptFreeObject(provider);
+            Ok(Self { encryptor })
         }
-
-        Ok(Self {
-            _biometric: biometric,
-        })
     }
 }
 
@@ -123,7 +71,10 @@ impl SecureStorage for TpmStorage {
 
         #[cfg(target_os = "windows")]
         {
-            tpm_encrypt(plaintext)
+            use enclaveapp_core::traits::EnclaveEncryptor;
+            self.encryptor
+                .encrypt(KEY_LABEL, plaintext)
+                .map_err(|e| anyhow!("TPM encryption failed: {e}"))
         }
     }
 
@@ -136,7 +87,12 @@ impl SecureStorage for TpmStorage {
 
         #[cfg(target_os = "windows")]
         {
-            tpm_decrypt(ciphertext)
+            use enclaveapp_core::traits::EnclaveEncryptor;
+            let plaintext = self
+                .encryptor
+                .decrypt(KEY_LABEL, ciphertext)
+                .map_err(|e| anyhow!("TPM decryption failed: {e}"))?;
+            Ok(Zeroizing::new(plaintext))
         }
     }
 
@@ -148,142 +104,10 @@ impl SecureStorage for TpmStorage {
 
         #[cfg(target_os = "windows")]
         {
-            tpm_delete_key()
+            use enclaveapp_core::traits::EnclaveKeyManager;
+            self.encryptor
+                .delete_key(KEY_LABEL)
+                .map_err(|e| anyhow!("failed to delete TPM key: {e}"))
         }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn tpm_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
-    use windows::core::*;
-    use windows::Win32::Security::Cryptography::*;
-
-    unsafe {
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
-            .map_err(|e| anyhow!("open provider: {e}"))?;
-
-        let mut key = NCRYPT_KEY_HANDLE::default();
-        NCryptOpenKey(
-            provider,
-            &mut key,
-            &HSTRING::from("sso-jwt-cache-key"),
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        )
-        .map_err(|e| anyhow!("open key: {e}"))?;
-
-        // Export public key, derive shared secret with ephemeral key,
-        // encrypt with AES-GCM. This mirrors the ECIES pattern.
-        // For brevity, we use NCryptEncrypt with OAEP padding as a
-        // placeholder. A full implementation would do ECDH + AES-GCM.
-
-        let mut output_size: u32 = 0;
-        NCryptEncrypt(
-            key,
-            Some(plaintext),
-            None,
-            None,
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("encrypt size query: {e}"))?;
-
-        let mut output = vec![0u8; output_size as usize];
-        NCryptEncrypt(
-            key,
-            Some(plaintext),
-            None,
-            Some(&mut output),
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("encrypt: {e}"))?;
-
-        output.truncate(output_size as usize);
-
-        NCryptFreeObject(key);
-        NCryptFreeObject(provider);
-
-        Ok(output)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn tpm_decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    use windows::core::*;
-    use windows::Win32::Security::Cryptography::*;
-
-    unsafe {
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
-            .map_err(|e| anyhow!("open provider: {e}"))?;
-
-        let mut key = NCRYPT_KEY_HANDLE::default();
-        NCryptOpenKey(
-            provider,
-            &mut key,
-            &HSTRING::from("sso-jwt-cache-key"),
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        )
-        .map_err(|e| anyhow!("open key: {e}"))?;
-
-        let mut output_size: u32 = 0;
-        NCryptDecrypt(
-            key,
-            Some(ciphertext),
-            None,
-            None,
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("decrypt size query: {e}"))?;
-
-        let mut output = vec![0u8; output_size as usize];
-        NCryptDecrypt(
-            key,
-            Some(ciphertext),
-            None,
-            Some(&mut output),
-            &mut output_size,
-            NCRYPT_PAD_PKCS1_FLAG,
-        )
-        .map_err(|e| anyhow!("decrypt: {e}"))?;
-
-        output.truncate(output_size as usize);
-
-        NCryptFreeObject(key);
-        NCryptFreeObject(provider);
-
-        Ok(Zeroizing::new(output))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn tpm_delete_key() -> Result<()> {
-    use windows::core::*;
-    use windows::Win32::Security::Cryptography::*;
-
-    unsafe {
-        let mut provider = NCRYPT_PROV_HANDLE::default();
-        NCryptOpenStorageProvider(&mut provider, MS_PLATFORM_CRYPTO_PROVIDER, 0)
-            .map_err(|e| anyhow!("open provider: {e}"))?;
-
-        let mut key = NCRYPT_KEY_HANDLE::default();
-        let result = NCryptOpenKey(
-            provider,
-            &mut key,
-            &HSTRING::from("sso-jwt-cache-key"),
-            CERT_KEY_SPEC(0),
-            NCRYPT_FLAGS::default(),
-        );
-
-        if result.is_ok() {
-            NCryptDeleteKey(key, 0).map_err(|e| anyhow!("delete key: {e}"))?;
-        }
-
-        NCryptFreeObject(provider);
-        Ok(())
     }
 }

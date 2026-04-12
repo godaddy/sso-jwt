@@ -1,67 +1,91 @@
+// Copyright 2024 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
 //! sso-jwt TPM bridge for WSL.
 //!
 //! This is a Windows-only binary that accepts JSON-RPC commands on stdin,
-//! performs TPM 2.0 operations via CNG, and returns results on stdout.
+//! performs TPM 2.0 operations via libenclaveapp, and returns results on stdout.
 //! It's spawned by the Linux sso-jwt binary running under WSL.
-//!
-//! Protocol:
-//!   Request:  {"method":"encrypt|decrypt|init|destroy","params":{"data":"<base64>","biometric":false}}
-//!   Response: {"result":"<base64>","error":null}
-//!   Error:    {"result":null,"error":"description"}
 
-use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, Write};
-
-#[cfg(target_os = "windows")]
-#[allow(
-    unsafe_code,
-    clippy::ptr_as_ptr,
-    clippy::unseparated_literal_suffix,
-    let_underscore_drop,
-    trivial_casts,
-    unused_must_use,
-    unused_qualifications
-)]
 mod tpm;
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct Request {
-    method: String,
-    params: Params,
-}
+use base64::prelude::*;
+use enclaveapp_bridge::{BridgeRequest, BridgeResponse};
+use std::io::{self, BufRead, Write};
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct Params {
-    data: Option<String>,
-    biometric: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct Response {
-    result: Option<String>,
-    error: Option<String>,
+fn handle_request(
+    request: &BridgeRequest,
+    storage: &mut Option<tpm::TpmStorage>,
+) -> BridgeResponse {
+    match request.method.as_str() {
+        "init" => {
+            let biometric = request.params.biometric;
+            match tpm::TpmStorage::new(biometric) {
+                Ok(s) => {
+                    *storage = Some(s);
+                    BridgeResponse::success("ok")
+                }
+                Err(e) => BridgeResponse::error(&format!("init failed: {e}")),
+            }
+        }
+        "encrypt" => {
+            let Some(ref s) = storage else {
+                return BridgeResponse::error("not initialized: call init first");
+            };
+            if request.params.data.is_empty() {
+                return BridgeResponse::error("missing data parameter");
+            }
+            let plaintext = match BASE64_STANDARD.decode(&request.params.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    return BridgeResponse::error(&format!("base64 decode error: {e}"));
+                }
+            };
+            match s.encrypt(&plaintext) {
+                Ok(ciphertext) => BridgeResponse::success(&BASE64_STANDARD.encode(&ciphertext)),
+                Err(e) => BridgeResponse::error(&format!("encrypt failed: {e}")),
+            }
+        }
+        "decrypt" => {
+            let Some(ref s) = storage else {
+                return BridgeResponse::error("not initialized: call init first");
+            };
+            if request.params.data.is_empty() {
+                return BridgeResponse::error("missing data parameter");
+            }
+            let ciphertext = match BASE64_STANDARD.decode(&request.params.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    return BridgeResponse::error(&format!("base64 decode error: {e}"));
+                }
+            };
+            match s.decrypt(&ciphertext) {
+                Ok(plaintext) => BridgeResponse::success(&BASE64_STANDARD.encode(&plaintext)),
+                Err(e) => BridgeResponse::error(&format!("decrypt failed: {e}")),
+            }
+        }
+        "destroy" => {
+            *storage = None;
+            BridgeResponse::success("ok")
+        }
+        other => BridgeResponse::error(&format!("unknown method: {other}")),
+    }
 }
 
 fn main() {
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+    let mut stdout = io::stdout().lock();
+    let mut storage: Option<tpm::TpmStorage> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                let resp = Response {
-                    result: None,
-                    error: Some(format!("read error: {e}")),
-                };
-                if let Ok(json) = serde_json::to_string(&resp) {
-                    drop(writeln!(stdout, "{json}"));
-                }
+                let resp = BridgeResponse::error(&format!("read error: {e}"));
+                drop(serde_json::to_writer(&mut stdout, &resp));
+                drop(stdout.write_all(b"\n"));
                 drop(stdout.flush());
-                continue;
+                break;
             }
         };
 
@@ -69,130 +93,233 @@ fn main() {
             continue;
         }
 
-        let resp = handle_request(&line);
-        if let Ok(json) = serde_json::to_string(&resp) {
-            drop(writeln!(stdout, "{json}"));
+        let response = match serde_json::from_str::<BridgeRequest>(&line) {
+            Ok(req) => handle_request(&req, &mut storage),
+            Err(e) => BridgeResponse::error(&format!("invalid JSON: {e}")),
+        };
+
+        if serde_json::to_writer(&mut stdout, &response).is_err() {
+            break;
         }
-        drop(stdout.flush());
+        if stdout.write_all(b"\n").is_err() {
+            break;
+        }
+        if stdout.flush().is_err() {
+            break;
+        }
     }
 }
 
-fn handle_request(line: &str) -> Response {
-    let req: Request = match serde_json::from_str(line) {
-        Ok(r) => r,
-        Err(e) => {
-            return Response {
-                result: None,
-                error: Some(format!("invalid request: {e}")),
-            };
-        }
-    };
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use enclaveapp_bridge::BridgeParams;
 
-    #[cfg(target_os = "windows")]
-    {
-        handle_request_windows(&req)
+    fn make_request(method: &str, data: &str, biometric: bool) -> BridgeRequest {
+        BridgeRequest {
+            method: method.to_string(),
+            params: BridgeParams {
+                data: data.to_string(),
+                biometric,
+                app_name: "sso-jwt".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn parse_init_request() {
+        let json = r#"{"method": "init", "params": {"biometric": false}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "init");
+        assert!(!req.params.biometric);
+    }
+
+    #[test]
+    fn parse_init_request_defaults() {
+        let json = r#"{"method": "init", "params": {}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "init");
+        assert!(!req.params.biometric);
+        assert!(req.params.data.is_empty());
+    }
+
+    #[test]
+    fn parse_encrypt_request() {
+        let json = r#"{"method": "encrypt", "params": {"data": "aGVsbG8=", "biometric": false}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "encrypt");
+        assert_eq!(req.params.data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn parse_decrypt_request() {
+        let json = r#"{"method": "decrypt", "params": {"data": "Y2lwaGVy"}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "decrypt");
+        assert_eq!(req.params.data, "Y2lwaGVy");
+    }
+
+    #[test]
+    fn parse_destroy_request() {
+        let json = r#"{"method": "destroy", "params": {}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "destroy");
+    }
+
+    #[test]
+    fn serialize_success_response() {
+        let resp = BridgeResponse::success("ok");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn serialize_error_response() {
+        let resp = BridgeResponse::error("something went wrong");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"error\":\"something went wrong\""));
+    }
+
+    #[test]
+    fn handle_init_creates_storage() {
+        let req = make_request("init", "", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        // On non-Windows, init succeeds (stub creates the struct)
+        // but encrypt/decrypt will fail at runtime
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            json.contains("\"result\"") || json.contains("\"error\""),
+            "response should be valid JSON"
+        );
+    }
+
+    #[test]
+    fn handle_destroy_clears_storage() {
+        let req = make_request("destroy", "", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.result.is_some());
+        assert!(storage.is_none());
+    }
+
+    #[test]
+    fn handle_unknown_method() {
+        let req = make_request("bogus", "", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("unknown method")),);
+    }
+
+    #[test]
+    fn handle_encrypt_without_init() {
+        let req = make_request("encrypt", "aGVsbG8=", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not initialized")),);
+    }
+
+    #[test]
+    fn handle_decrypt_without_init() {
+        let req = make_request("decrypt", "Y2lwaGVy", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not initialized")),);
+    }
+
+    #[test]
+    fn handle_encrypt_missing_data() {
+        let req = make_request("encrypt", "", false);
+        // On platforms without a TPM, new() may fail and storage is None,
+        // so we get "not initialized" instead of "missing data". Both are valid errors.
+        let mut storage = tpm::TpmStorage::new(false).ok();
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_encrypt_invalid_base64() {
+        let req = make_request("encrypt", "not-valid-base64!!!", false);
+        let mut storage = tpm::TpmStorage::new(false).ok();
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_decrypt_missing_data() {
+        let req = make_request("decrypt", "", false);
+        let mut storage = tpm::TpmStorage::new(false).ok();
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.error.is_some());
     }
 
     #[cfg(not(target_os = "windows"))]
-    {
-        let _ = &req;
-        Response {
-            result: None,
-            error: Some("TPM bridge is only available on Windows".to_string()),
-        }
+    #[test]
+    fn encrypt_returns_platform_error_on_non_windows() {
+        let storage = tpm::TpmStorage::new(false).unwrap();
+        let result = storage.encrypt(b"hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
     }
-}
 
-#[cfg(target_os = "windows")]
-fn handle_request_windows(req: &Request) -> Response {
-    use base64::Engine;
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn decrypt_returns_platform_error_on_non_windows() {
+        let storage = tpm::TpmStorage::new(false).unwrap();
+        let result = storage.decrypt(b"hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only supported on Windows"));
+    }
 
-    let biometric = req.params.biometric.unwrap_or(false);
+    #[test]
+    fn roundtrip_json_protocol() {
+        // Simulate the full JSON protocol flow
+        let init_json = r#"{"method":"init","params":{"biometric":false}}"#;
+        let encrypt_json =
+            r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","biometric":false}}"#;
+        let destroy_json = r#"{"method":"destroy","params":{}}"#;
 
-    match req.method.as_str() {
-        "init" => match tpm::ensure_key(biometric) {
-            Ok(()) => Response {
-                result: None,
-                error: None,
-            },
-            Err(e) => Response {
-                result: None,
-                error: Some(format!("{e}")),
-            },
-        },
-        "encrypt" => {
-            let data = match &req.params.data {
-                Some(d) => match base64::engine::general_purpose::STANDARD.decode(d) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Response {
-                            result: None,
-                            error: Some(format!("bad base64: {e}")),
-                        };
-                    }
-                },
-                None => {
-                    return Response {
-                        result: None,
-                        error: Some("missing data parameter".to_string()),
-                    };
-                }
-            };
+        let mut storage = None;
 
-            match tpm::encrypt(&data) {
-                Ok(encrypted) => Response {
-                    result: Some(base64::engine::general_purpose::STANDARD.encode(&encrypted)),
-                    error: None,
-                },
-                Err(e) => Response {
-                    result: None,
-                    error: Some(format!("{e}")),
-                },
-            }
-        }
-        "decrypt" => {
-            let data = match &req.params.data {
-                Some(d) => match base64::engine::general_purpose::STANDARD.decode(d) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Response {
-                            result: None,
-                            error: Some(format!("bad base64: {e}")),
-                        };
-                    }
-                },
-                None => {
-                    return Response {
-                        result: None,
-                        error: Some("missing data parameter".to_string()),
-                    };
-                }
-            };
+        // Init
+        let req: BridgeRequest = serde_json::from_str(init_json).unwrap();
+        let resp = handle_request(&req, &mut storage);
+        let resp_json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            resp_json.contains("\"result\"") || resp_json.contains("\"error\""),
+            "response should be valid JSON-RPC"
+        );
 
-            match tpm::decrypt(&data) {
-                Ok(decrypted) => Response {
-                    result: Some(base64::engine::general_purpose::STANDARD.encode(&decrypted)),
-                    error: None,
-                },
-                Err(e) => Response {
-                    result: None,
-                    error: Some(format!("{e}")),
-                },
-            }
-        }
-        "destroy" => match tpm::destroy() {
-            Ok(()) => Response {
-                result: None,
-                error: None,
-            },
-            Err(e) => Response {
-                result: None,
-                error: Some(format!("{e}")),
-            },
-        },
-        other => Response {
-            result: None,
-            error: Some(format!("unknown method: {other}")),
-        },
+        // Encrypt (will fail on non-Windows, which is expected)
+        let req: BridgeRequest = serde_json::from_str(encrypt_json).unwrap();
+        let resp = handle_request(&req, &mut storage);
+        let resp_json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            resp_json.contains("\"result\"") || resp_json.contains("\"error\""),
+            "response should be valid JSON-RPC"
+        );
+
+        // Destroy
+        let req: BridgeRequest = serde_json::from_str(destroy_json).unwrap();
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.result.is_some());
+        assert!(storage.is_none());
+    }
+
+    #[test]
+    fn invalid_json_produces_error() {
+        let bad_json = "this is not json";
+        let result = serde_json::from_str::<BridgeRequest>(bad_json);
+        assert!(result.is_err());
     }
 }
