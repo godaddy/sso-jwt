@@ -16,9 +16,7 @@ jobs:
       linux_deps: "libdbus-1-dev pkg-config"
       unix_binaries: "sso-jwt"
       windows_binaries: "sso-jwt.exe sso-jwt-tpm-bridge.exe"
-      # MSI disabled: WiX definition bundles a Linux binary for WSL which
-      # requires cross-runner artifact sharing not supported by the reusable workflow.
-      # Users install via Scoop on Windows instead.
+      wix_file: "installer/sso-jwt.wxs"
       homebrew: '{"tap_repo":"jgowdy/homebrew-sso-jwt","formula_class":"SsoJwt","description":"SSO JWT CLI with hardware-backed secure caching"}'
       scoop: '{"bucket_repo":"jgowdy/scoop-sso-jwt","description":"SSO JWT with hardware-backed caching (Windows TPM 2.0)","has_winget":true}'
     secrets:
