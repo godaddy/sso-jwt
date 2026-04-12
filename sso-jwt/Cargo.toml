@@ -1,6 +1,6 @@
 [package]
 name = "sso-jwt"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "SSO JWT CLI with hardware-backed secure caching"
 license = "MIT"
