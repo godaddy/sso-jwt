@@ -236,10 +236,10 @@ fn run_add_server(
 }
 
 /// Fetch a file from GitHub using multiple strategies, in order:
-/// 1. `gh` CLI (handles SAML SSO, internal repos, all auth)
-/// 2. GitHub API with `gh auth token` (direct HTTP)
-/// 3. Raw GitHub URL (public repos only)
-/// 4. `git archive` over SSH
+/// 1. `git archive` over SSH (most common auth: SSH keys)
+/// 2. `gh` CLI (handles SAML SSO, internal repos, PATs)
+/// 3. GitHub API with `gh auth token` (direct HTTP)
+/// 4. Raw GitHub URL (public repos only)
 fn fetch_from_github(github_path: &str) -> Result<String> {
     let parts: Vec<&str> = github_path.splitn(3, '/').collect();
     if parts.len() < 3 {
@@ -247,14 +247,13 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
     }
     let (owner, repo, path) = (parts[0], parts[1], parts[2]);
 
-    // Strategy 1: gh CLI -- most reliable, handles all auth types
-    if let Ok(output) = std::process::Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{owner}/{repo}/contents/{path}"),
-            "-H",
-            "Accept: application/vnd.github.raw+json",
-        ])
+    // Strategy 1: git archive over SSH -- most users have SSH keys configured
+    let shell_cmd = format!(
+        "git archive --remote=git@github.com:{owner}/{repo}.git HEAD {path} | tar -xO {path}"
+    );
+    if let Ok(output) = std::process::Command::new("sh")
+        .args(["-c", &shell_cmd])
+        .stderr(std::process::Stdio::null())
         .output()
     {
         if output.status.success() {
@@ -265,9 +264,29 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
         }
     }
 
-    // Strategy 2: GitHub API with gh auth token
+    // Strategy 2: gh CLI -- handles SAML SSO, internal repos
+    if let Ok(output) = std::process::Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{owner}/{repo}/contents/{path}"),
+            "-H",
+            "Accept: application/vnd.github.raw+json",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let content = String::from_utf8_lossy(&output.stdout).to_string();
+            if !content.is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+
+    // Strategy 3: GitHub API with gh auth token
     let gh_token = std::process::Command::new("gh")
         .args(["auth", "token"])
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -291,28 +310,12 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
         }
     }
 
-    // Strategy 3: Raw GitHub URL (works for public repos)
+    // Strategy 4: Raw GitHub URL (public repos only)
     let raw_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
     if let Ok(resp) = reqwest::blocking::get(&raw_url) {
         if resp.status().is_success() {
             if let Ok(text) = resp.text() {
                 return Ok(text);
-            }
-        }
-    }
-
-    // Strategy 4: git archive over SSH, piped through tar
-    let shell_cmd = format!(
-        "git archive --remote=git@github.com:{owner}/{repo}.git HEAD {path} | tar -xO {path}"
-    );
-    if let Ok(output) = std::process::Command::new("sh")
-        .args(["-c", &shell_cmd])
-        .output()
-    {
-        if output.status.success() {
-            let content = String::from_utf8_lossy(&output.stdout).to_string();
-            if !content.is_empty() {
-                return Ok(content);
             }
         }
     }
