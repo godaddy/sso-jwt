@@ -113,7 +113,7 @@ jobs:
 
       - name: Install WiX
         shell: pwsh
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 5.0.2
 
       - name: Build MSI
         shell: pwsh
