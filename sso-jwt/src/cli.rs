@@ -236,10 +236,10 @@ fn run_add_server(
 }
 
 /// Fetch a file from GitHub using multiple strategies, in order:
-/// 1. `git archive` over SSH (most common auth: SSH keys)
-/// 2. `gh` CLI (handles SAML SSO, internal repos, PATs)
-/// 3. GitHub API with `gh auth token` (direct HTTP)
-/// 4. Raw GitHub URL (public repos only)
+/// 1. Raw GitHub URL (fast, no auth, works for public repos)
+/// 2. `git archive` over SSH (most users have SSH keys)
+/// 3. `gh` CLI (handles SAML SSO, internal repos, PATs)
+/// 4. GitHub API with `gh auth token` (direct HTTP)
 fn fetch_from_github(github_path: &str) -> Result<String> {
     let parts: Vec<&str> = github_path.splitn(3, '/').collect();
     if parts.len() < 3 {
@@ -247,7 +247,17 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
     }
     let (owner, repo, path) = (parts[0], parts[1], parts[2]);
 
-    // Strategy 1: git archive over SSH -- most users have SSH keys configured
+    // Strategy 1: Raw GitHub URL (fast, no auth needed for public repos)
+    let raw_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
+    if let Ok(resp) = reqwest::blocking::get(&raw_url) {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text() {
+                return Ok(text);
+            }
+        }
+    }
+
+    // Strategy 2: git archive over SSH -- most users have SSH keys configured
     let shell_cmd = format!(
         "git archive --remote=git@github.com:{owner}/{repo}.git HEAD {path} | tar -xO {path}"
     );
@@ -264,7 +274,7 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
         }
     }
 
-    // Strategy 2: gh CLI -- handles SAML SSO, internal repos
+    // Strategy 3: gh CLI -- handles SAML SSO, internal repos
     if let Ok(output) = std::process::Command::new("gh")
         .args([
             "api",
@@ -306,16 +316,6 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
                 if let Ok(text) = resp.text() {
                     return Ok(text);
                 }
-            }
-        }
-    }
-
-    // Strategy 4: Raw GitHub URL (public repos only)
-    let raw_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
-    if let Ok(resp) = reqwest::blocking::get(&raw_url) {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text() {
-                return Ok(text);
             }
         }
     }
