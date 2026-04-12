@@ -1516,17 +1516,18 @@ dependencies = [
 
 [[package]]
 name = "sso-jwt"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",
+ "enclaveapp-wsl",
  "reqwest",
  "sso-jwt-lib",
 ]
 
 [[package]]
 name = "sso-jwt-lib"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1549,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "sso-jwt-napi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "napi",
@@ -1561,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "sso-jwt-tpm-bridge"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "enclaveapp-bridge",
