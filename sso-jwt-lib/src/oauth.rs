@@ -518,4 +518,67 @@ mod tests {
         drop(poll_for_token(&client, &url, None, "c", "d", 0, 10));
         mock.assert();
     }
+
+    #[test]
+    fn parse_token_poll_empty_object() {
+        // No access_token and no error field
+        let json = r#"{}"#;
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid JSON");
+        assert!(resp.access_token.is_none());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn parse_token_poll_expired_token_error() {
+        let json = r#"{"error":"expired_token"}"#;
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid JSON");
+        assert!(resp.access_token.is_none());
+        assert_eq!(resp.error.as_deref(), Some("expired_token"));
+    }
+
+    #[test]
+    fn device_code_response_with_only_required_fields() {
+        // Only the three required fields, interval and expires_in use defaults
+        let json = r#"{
+            "device_code": "minimal",
+            "user_code": "12345678",
+            "verification_uri": "https://example.com"
+        }"#;
+        let resp: DeviceCodeResponse =
+            serde_json::from_str(json).expect("valid device code JSON");
+        assert_eq!(resp.device_code, "minimal");
+        assert_eq!(resp.interval, 5);
+        assert_eq!(resp.expires_in, 600);
+    }
+
+    #[test]
+    fn parse_heartbeat_response_missing_data_field() {
+        #[derive(Deserialize)]
+        struct HeartbeatResponse {
+            data: Option<String>,
+        }
+        // Empty object — data field missing entirely
+        let json = r#"{}"#;
+        let resp: HeartbeatResponse = serde_json::from_str(json).expect("valid JSON");
+        assert!(resp.data.is_none());
+    }
+
+    #[test]
+    fn get_device_code_non_success_status_returns_error() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("internal error")
+            .create();
+
+        let client = reqwest::blocking::Client::new();
+        let result = get_device_code(&client, &server.url(), "cid");
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should be an error").to_string();
+        assert!(
+            err_msg.contains("500"),
+            "error should mention status code, got: {err_msg}"
+        );
+    }
 }

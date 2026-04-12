@@ -111,4 +111,48 @@ pub mod mock {
         let decrypted = storage.decrypt(&encrypted).unwrap();
         assert_eq!(&*decrypted, plaintext);
     }
+
+    #[test]
+    fn mock_roundtrip_various_sizes() {
+        let storage = MockStorage::new();
+        for size in [0, 1, 100, 10_000] {
+            let plaintext = vec![0xAB_u8; size];
+            let encrypted = storage.encrypt(&plaintext).unwrap();
+            let decrypted = storage.decrypt(&encrypted).unwrap();
+            assert_eq!(&*decrypted, &plaintext[..], "roundtrip failed for size {size}");
+        }
+    }
+
+    #[test]
+    fn mock_encrypt_differs_from_plaintext() {
+        let storage = MockStorage::new();
+        let plaintext = b"sensitive data here";
+        let encrypted = storage.encrypt(plaintext).unwrap();
+        // XOR with a non-zero key means every non-zero byte changes
+        assert_ne!(&encrypted[..], &plaintext[..]);
+    }
+
+    #[test]
+    fn mock_destroy_succeeds() {
+        let storage = MockStorage::new();
+        assert!(storage.destroy().is_ok());
+    }
+
+    #[test]
+    fn mock_encrypt_empty_roundtrip() {
+        let storage = MockStorage::new();
+        let encrypted = storage.encrypt(b"").unwrap();
+        let decrypted = storage.decrypt(&encrypted).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn mock_encrypt_single_byte_roundtrip() {
+        let storage = MockStorage::new();
+        let encrypted = storage.encrypt(&[0x42]).unwrap();
+        // 0x42 XOR 0x42 = 0x00
+        assert_eq!(&encrypted[..], &[0x00]);
+        let decrypted = storage.decrypt(&encrypted).unwrap();
+        assert_eq!(&*decrypted, &[0x42]);
+    }
 }

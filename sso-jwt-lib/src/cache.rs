@@ -1077,4 +1077,62 @@ mod tests {
             TokenState::Dead,
         );
     }
+
+    #[test]
+    fn cache_file_with_partial_magic_returns_none() {
+        // File starts with "SJ" then truncates — too short for header
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("partial_magic.enc");
+        fs::write(&path, b"SJ").expect("write partial magic");
+        assert!(read_header(&path).expect("read_header").is_none());
+    }
+
+    #[test]
+    fn cache_file_one_byte_short_of_header_returns_none() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("short_header.enc");
+        // HEADER_SIZE is 26, write 25 bytes with valid magic prefix
+        let mut data = Vec::with_capacity(HEADER_SIZE - 1);
+        data.extend_from_slice(MAGIC);
+        data.push(FORMAT_VERSION);
+        data.extend_from_slice(&[0_u8; HEADER_SIZE - 6]); // fill remaining but 1 byte short
+        assert_eq!(data.len(), HEADER_SIZE - 1);
+        fs::write(&path, &data).expect("write truncated header file");
+        assert!(read_header(&path).expect("read_header").is_none());
+    }
+
+    #[test]
+    fn token_state_all_four_variants_reachable_for_risk_level_1() {
+        let now = 1700000000;
+        // Fresh: age < 79200 (86400 - 7200)
+        assert_eq!(
+            classify_token_at(now, now - 1000, now - 1000, 1),
+            TokenState::Fresh
+        );
+        // RefreshWindow: age in [79200, 86400)
+        assert_eq!(
+            classify_token_at(now, now - 80000, now - 80000, 1),
+            TokenState::RefreshWindow
+        );
+        // Grace: age in [86400, 86700)
+        assert_eq!(
+            classify_token_at(now, now - 86600, now - 86600, 1),
+            TokenState::Grace
+        );
+        // Dead: age >= 86700
+        assert_eq!(
+            classify_token_at(now, now - 87000, now - 87000, 1),
+            TokenState::Dead
+        );
+    }
+
+    #[test]
+    fn max_age_values_for_all_risk_levels() {
+        // Verify the helper functions for completeness
+        assert_eq!(max_age_secs(1), 86400);
+        assert_eq!(max_age_secs(2), 43200);
+        assert_eq!(max_age_secs(3), 3600);
+        assert_eq!(max_age_secs(0), 43200); // default
+        assert_eq!(max_age_secs(255), 43200); // default
+    }
 }

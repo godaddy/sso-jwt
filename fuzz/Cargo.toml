@@ -1,0 +1,21 @@
+[package]
+name = "sso-jwt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sso-jwt-lib = { path = "../sso-jwt-lib" }
+serde_json = "1"
+
+[[bin]]
+name = "fuzz_parse_claims"
+path = "fuzz_targets/parse_claims.rs"
+
+[[bin]]
+name = "fuzz_device_code_response"
+path = "fuzz_targets/device_code_response.rs"
