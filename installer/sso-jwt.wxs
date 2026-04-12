@@ -74,12 +74,8 @@
             Return="ignore" />
 
         <InstallExecuteSequence>
-            <Custom Action="SsoJwtInstall" After="InstallFiles">
-                NOT REMOVE
-            </Custom>
-            <Custom Action="SsoJwtUninstall" Before="RemoveFiles">
-                REMOVE="ALL"
-            </Custom>
+            <Custom Action="SsoJwtInstall" After="InstallFiles" Condition="NOT REMOVE" />
+            <Custom Action="SsoJwtUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
         </InstallExecuteSequence>
 
     </Package>
