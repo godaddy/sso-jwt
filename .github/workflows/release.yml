@@ -27,10 +27,8 @@ jobs:
             os: ubuntu-latest
             binary: sso-jwt
             archive: sso-jwt-x86_64-unknown-linux-gnu.tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            binary: sso-jwt
-            archive: sso-jwt-aarch64-unknown-linux-gnu.tar.gz
+          # aarch64-linux omitted: cross-compiling with libdbus needs
+          # a proper cross toolchain (e.g. `cross`). Add back when needed.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary: sso-jwt.exe
@@ -48,15 +46,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Install cross-compilation tools (aarch64-linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          cat >> ~/.cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
 
       - name: Set version from tag
         shell: bash
