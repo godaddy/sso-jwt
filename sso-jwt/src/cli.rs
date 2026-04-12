@@ -12,14 +12,13 @@ use crate::shell_init;
     about = "Obtain SSO JWTs with hardware-backed secure caching"
 )]
 pub struct Cli {
-    /// SSO environment
-    #[arg(
-        short,
-        long,
-        default_value = "prod",
-        value_parser = ["dev", "test", "ote", "prod"]
-    )]
-    pub environment: String,
+    /// Server profile to use
+    #[arg(short, long)]
+    pub server: Option<String>,
+
+    /// Server environment
+    #[arg(short, long)]
+    pub environment: Option<String>,
 
     /// Cache name (allows multiple concurrent caches)
     #[arg(short, long, default_value = "default")]
@@ -96,9 +95,10 @@ pub fn run(cli: Cli) -> Result<()> {
         _ => {}
     }
 
-    // Load config and apply CLI overrides
+    // Load config, apply CLI overrides, and resolve server profile
     let mut config = Config::load()?;
     apply_cli_overrides(&mut config, &cli);
+    config.resolve_server()?;
 
     match cli.command {
         Some(Commands::Exec { ref command }) => {
@@ -168,17 +168,21 @@ fn run_uninstall() -> Result<()> {
 }
 
 fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
-    config.environment = cli.environment.clone();
+    if let Some(ref s) = cli.server {
+        config.server = s.clone();
+    }
+    if let Some(ref e) = cli.environment {
+        config.environment = Some(e.clone());
+    }
+    if let Some(ref u) = cli.oauth_url {
+        config.oauth_url = u.clone();
+    }
     config.cache_name = cli.cache_name.clone();
     config.risk_level = cli.risk_level;
     config.no_open = cli.no_open;
     config.clear = cli.clear;
-
     if cli.biometric {
         config.biometric = true;
-    }
-    if cli.oauth_url.is_some() {
-        config.oauth_url.clone_from(&cli.oauth_url);
     }
 }
 

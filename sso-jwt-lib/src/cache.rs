@@ -275,9 +275,47 @@ pub fn resolve_token(config: &Config, storage: &dyn SecureStorage) -> Result<Str
                 let token = String::from_utf8(plaintext.to_vec())
                     .context("cached token is not valid UTF-8")?;
 
-                match oauth::heartbeat_refresh(&config.sso_url(), &token) {
-                    Some(new_token) => {
-                        // Cache the refreshed token, preserve session_start
+                // If no heartbeat URL configured, treat like Fresh (return cached)
+                if let Some(ref heartbeat_url) = config.heartbeat_url {
+                    match oauth::heartbeat_refresh(heartbeat_url, &token) {
+                        Some(new_token) => {
+                            // Cache the refreshed token, preserve session_start
+                            write_cache(
+                                &cache_path,
+                                storage,
+                                &new_token,
+                                config.risk_level,
+                                header.session_start,
+                            )?;
+                            return Ok(new_token);
+                        }
+                        None => {
+                            let remaining_secs = max_age_secs(config.risk_level)
+                                .saturating_sub(now_secs().saturating_sub(header.token_iat));
+                            let remaining_min = remaining_secs / 60;
+                            eprintln!(
+                                "warning: token refresh failed, using cached token (expires in {remaining_min}m)"
+                            );
+                            return Ok(token);
+                        }
+                    }
+                } else {
+                    return Ok(token);
+                }
+            }
+
+            TokenState::Grace => {
+                // If no heartbeat URL, treat like Dead (go straight to re-auth)
+                if let Some(ref heartbeat_url) = config.heartbeat_url {
+                    // Decrypt, try refresh, fall back to full re-auth
+                    let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
+                    let plaintext = storage
+                        .decrypt(&ciphertext)
+                        .context("failed to decrypt cached token")?;
+                    let token = String::from_utf8(plaintext.to_vec())
+                        .context("cached token is not valid UTF-8")?;
+
+                    if let Some(new_token) = oauth::heartbeat_refresh(heartbeat_url, &token) {
                         write_cache(
                             &cache_path,
                             storage,
@@ -287,36 +325,6 @@ pub fn resolve_token(config: &Config, storage: &dyn SecureStorage) -> Result<Str
                         )?;
                         return Ok(new_token);
                     }
-                    None => {
-                        let remaining_secs = max_age_secs(config.risk_level)
-                            .saturating_sub(now_secs().saturating_sub(header.token_iat));
-                        let remaining_min = remaining_secs / 60;
-                        eprintln!(
-                            "warning: token refresh failed, using cached token (expires in {remaining_min}m)"
-                        );
-                        return Ok(token);
-                    }
-                }
-            }
-
-            TokenState::Grace => {
-                // Decrypt, try refresh, fall back to full re-auth
-                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
-                let plaintext = storage
-                    .decrypt(&ciphertext)
-                    .context("failed to decrypt cached token")?;
-                let token = String::from_utf8(plaintext.to_vec())
-                    .context("cached token is not valid UTF-8")?;
-
-                if let Some(new_token) = oauth::heartbeat_refresh(&config.sso_url(), &token) {
-                    write_cache(
-                        &cache_path,
-                        storage,
-                        &new_token,
-                        config.risk_level,
-                        header.session_start,
-                    )?;
-                    return Ok(new_token);
                 }
                 // Fall through to full re-auth
             }
@@ -328,9 +336,8 @@ pub fn resolve_token(config: &Config, storage: &dyn SecureStorage) -> Result<Str
     }
 
     // Full re-authentication
-    let oauth_url = config.oauth_url()?;
     let auto_open = !config.no_open;
-    let token = oauth::authenticate(&oauth_url, auto_open)?;
+    let token = oauth::authenticate(&config.oauth_url, &config.client_id, auto_open)?;
 
     let token_iat = jwt::extract_iat(&token).unwrap_or_else(|_| now_secs());
 

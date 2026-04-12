@@ -2,10 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
 
-/// Non-secret client identifier. Helps the webservice isolate requests
-/// from this client vs. hypothetical other clients.
-const CLIENT_ID: &str = "e238e416";
-
 /// Response from the initial device code request.
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
@@ -36,12 +32,13 @@ struct TokenPollResponse {
 pub fn get_device_code(
     client: &reqwest::blocking::Client,
     oauth_url: &str,
+    client_id: &str,
 ) -> Result<DeviceCodeResponse> {
     let url = format!("{oauth_url}/token");
     let resp = client
         .post(&url)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(format!("client_id={CLIENT_ID}"))
+        .body(format!("client_id={client_id}"))
         .send()
         .context("failed to request device code")?;
 
@@ -62,6 +59,7 @@ pub fn get_device_code(
 pub fn poll_for_token(
     client: &reqwest::blocking::Client,
     oauth_url: &str,
+    client_id: &str,
     device_code: &str,
     interval: u64,
     expires_in: u64,
@@ -83,7 +81,7 @@ pub fn poll_for_token(
         let resp = client
             .post(&url)
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(format!("client_id={CLIENT_ID}&device_code={device_code}"))
+            .body(format!("client_id={client_id}&device_code={device_code}"))
             .send()
             .context("failed to poll for token")?;
 
@@ -144,13 +142,13 @@ pub fn open_browser(uri: &str) -> Result<()> {
 /// Run the full OAuth Device Code flow: request code, prompt user,
 /// poll for token.
 #[allow(clippy::print_stderr)]
-pub fn authenticate(oauth_url: &str, auto_open: bool) -> Result<String> {
+pub fn authenticate(oauth_url: &str, client_id: &str, auto_open: bool) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .context("failed to create HTTP client")?;
 
-    let code = get_device_code(&client, oauth_url)?;
+    let code = get_device_code(&client, oauth_url, client_id)?;
     let formatted_code = format_user_code(&code.user_code);
 
     if auto_open {
@@ -172,15 +170,17 @@ pub fn authenticate(oauth_url: &str, auto_open: bool) -> Result<String> {
     poll_for_token(
         &client,
         oauth_url,
+        client_id,
         &code.device_code,
         code.interval,
         code.expires_in,
     )
 }
 
-/// Attempt to refresh a token via the SSO heartbeat endpoint.
+/// Attempt to refresh a token via the heartbeat endpoint.
 /// Returns the new token on success, or None on failure.
-pub fn heartbeat_refresh(sso_url: &str, token: &str) -> Option<String> {
+/// The caller passes the full heartbeat URL directly.
+pub fn heartbeat_refresh(heartbeat_url: &str, token: &str) -> Option<String> {
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -189,9 +189,8 @@ pub fn heartbeat_refresh(sso_url: &str, token: &str) -> Option<String> {
         Err(_) => return None,
     };
 
-    let url = format!("{sso_url}/api/token/heartbeat");
     let resp = match client
-        .post(&url)
+        .post(heartbeat_url)
         .header("Authorization", format!("sso-jwt {token}"))
         .send()
     {
@@ -264,7 +263,7 @@ mod tests {
             "interval": 5,
             "expires_in": 600
         }"#;
-        let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
+        let resp: DeviceCodeResponse = serde_json::from_str(json).expect("valid device code JSON");
         assert_eq!(resp.device_code, "abc123");
         assert_eq!(resp.user_code, "WXYZ5678");
         assert_eq!(resp.interval, 5);
@@ -278,7 +277,8 @@ mod tests {
             "user_code": "1234",
             "verification_uri": "https://example.com"
         }"#;
-        let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
+        let resp: DeviceCodeResponse =
+            serde_json::from_str(json).expect("valid device code JSON with defaults");
         assert_eq!(resp.interval, 5);
         assert_eq!(resp.expires_in, 600);
     }
@@ -286,7 +286,8 @@ mod tests {
     #[test]
     fn parse_token_poll_with_token() {
         let json = r#"{"access_token":"test-token-value-not-a-real-jwt"}"#;
-        let resp: TokenPollResponse = serde_json::from_str(json).unwrap();
+        let resp: TokenPollResponse =
+            serde_json::from_str(json).expect("valid poll JSON with token");
         assert!(resp.access_token.is_some());
         assert!(resp.error.is_none());
     }
@@ -294,7 +295,7 @@ mod tests {
     #[test]
     fn parse_token_poll_pending() {
         let json = r#"{"error":"authorization_pending"}"#;
-        let resp: TokenPollResponse = serde_json::from_str(json).unwrap();
+        let resp: TokenPollResponse = serde_json::from_str(json).expect("valid poll JSON pending");
         assert!(resp.access_token.is_none());
         assert_eq!(resp.error.as_deref(), Some("authorization_pending"));
     }
@@ -324,8 +325,6 @@ mod tests {
 
     #[test]
     fn parse_token_poll_with_both_token_and_error() {
-        // When both access_token and error are present, the code checks
-        // access_token first via `if let Some(token) = poll.access_token`
         let json = r#"{"access_token":"my-token","error":"some_error"}"#;
         let resp: TokenPollResponse = serde_json::from_str(json).expect("valid poll JSON");
         assert_eq!(resp.access_token.as_deref(), Some("my-token"));
