@@ -2,7 +2,9 @@
 
 A Rust toolkit for obtaining SSO JWTs with hardware-backed secure caching.
 
-Replaces the Node.js `ssojwt` tool with a fast, native alternative that encrypts cached tokens using the Secure Enclave (macOS), TPM 2.0 (Windows), or a software keyring (Linux). Tokens never touch disk as plaintext and are never exported into long-lived shell environment variables.
+Replaces the Node.js `ssojwt` tool with a fast, native alternative that encrypts cached tokens using the Secure Enclave (macOS), TPM 2.0 (Windows/Linux), or a software fallback. Tokens never touch disk as plaintext and are never exported into long-lived shell environment variables.
+
+Implements the OAuth Device Code flow per [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628), with support for separate `token_url` endpoints for providers like GitHub that use distinct device authorization and token endpoints.
 
 ## Workspace
 
@@ -17,11 +19,33 @@ This repository is a Cargo workspace containing four crates:
 
 ## Installation
 
+**[Download latest release](https://github.com/jgowdy/sso-jwt/releases/latest)** -- pre-built binaries for macOS, Windows, and Linux.
+
 ### Homebrew (macOS)
 
 ```bash
 brew tap jgowdy/sso-jwt
 brew install sso-jwt
+```
+
+### Windows -- MSI installer
+
+Download `sso-jwt-x86_64-windows.msi` from the
+[latest release](https://github.com/jgowdy/sso-jwt/releases). Double-click
+to install.
+
+### Windows -- Scoop
+
+```powershell
+scoop bucket add sso-jwt https://github.com/jgowdy/scoop-sso-jwt
+scoop install sso-jwt
+```
+
+### Linux -- tarball
+
+```bash
+tar xzf sso-jwt-x86_64-unknown-linux-gnu.tar.gz
+sudo cp sso-jwt sso-jwt-tpm-bridge /usr/local/bin/
 ```
 
 ### From source
@@ -217,21 +241,16 @@ The absolute session timeout prevents indefinite refresh chains.
 
 ## Platform Security
 
-### macOS (Secure Enclave)
+All platform-specific crypto is provided by
+[libenclaveapp](https://github.com/jgowdy/libenclaveapp).
 
-Requires T2 chip (2018+ Intel Macs) or Apple Silicon. P-256 EC key pair generated inside the Secure Enclave. Encryption uses ECIES (cofactor X9.63 SHA-256 AES-GCM). The private key never leaves the hardware.
-
-### Windows (TPM 2.0)
-
-Requires TPM 2.0 module. Key created via the Microsoft Platform Crypto Provider (CNG). Key material is hardware-resident and non-exportable.
-
-### WSL
-
-Auto-detected. A bridge process (`sso-jwt-tpm-bridge.exe`) on the Windows host performs TPM operations via JSON-RPC over stdin/stdout pipes.
-
-### Linux
-
-Uses the D-Bus Secret Service API (GNOME Keyring / KDE Wallet). Software-only -- no hardware binding.
+| Platform | Backend | Notes |
+|---|---|---|
+| macOS (Apple Silicon / T2) | Secure Enclave | CryptoKit ECIES via enclaveapp-apple |
+| Windows | TPM 2.0 | CNG Platform Crypto Provider via enclaveapp-windows |
+| WSL | Windows TPM via bridge | JSON-RPC to sso-jwt-tpm-bridge.exe |
+| Linux (with TPM) | TPM 2.0 | tss-esapi via enclaveapp-linux-tpm |
+| Linux (no TPM) | Software fallback | File-based encryption, one-time warning |
 
 ## Compatibility
 
