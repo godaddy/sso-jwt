@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: JGowdy.sso-jwt
+PackageVersion: 0.1.1
+MinimumOSVersion: 10.0.17763.0
+InstallerType: wix
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Commands:
+  - sso-jwt
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/jgowdy/sso-jwt/releases/download/v0.1.1/sso-jwt-x86_64-windows.msi
+    InstallerSha256: PLACEHOLDER
+ManifestType: installer
+ManifestVersion: 1.6.0

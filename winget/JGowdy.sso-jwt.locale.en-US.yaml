@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: JGowdy.sso-jwt
+PackageVersion: 0.1.1
+PackageLocale: en-US
+Publisher: Jay Gowdy
+PublisherUrl: https://github.com/jgowdy
+PackageName: sso-jwt
+PackageUrl: https://github.com/jgowdy/sso-jwt
+License: MIT
+LicenseUrl: https://github.com/jgowdy/sso-jwt/blob/main/LICENSE
+ShortDescription: SSO JWT CLI with hardware-backed secure caching using Secure Enclave and TPM 2.0
+Description: |-
+  sso-jwt obtains and caches OAuth JWTs with hardware-backed encryption.
+  Tokens are encrypted at rest using the Secure Enclave (macOS) or TPM 2.0
+  (Windows), proactively refreshed before expiration, and never written to
+  disk as plaintext. Supports configurable server profiles, shell integration
+  for export detection, and automatic WSL distribution setup.
+Tags:
+  - jwt
+  - oauth
+  - security
+  - tpm
+  - secure-enclave
+  - sso
+  - authentication
+ReleaseNotesUrl: https://github.com/jgowdy/sso-jwt/releases/tag/v0.1.1
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

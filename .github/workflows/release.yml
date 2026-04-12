@@ -292,3 +292,53 @@ jobs:
           git add -A
           git diff --cached --quiet || git commit -m "Update sso-jwt to ${version}"
           git push
+
+  generate-winget:
+    name: Generate winget Manifest
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute MSI SHA256
+        id: sha
+        run: |
+          msi_sha=$(sha256sum artifacts/sso-jwt-x86_64-windows.msi | cut -d' ' -f1 | tr 'a-f' 'A-F')
+          echo "msi=$msi_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Generate winget manifest
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+
+          mkdir -p /tmp/winget
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+            winget/JGowdy.sso-jwt.yaml > /tmp/winget/JGowdy.sso-jwt.yaml
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+              -e "s|InstallerUrl: .*|InstallerUrl: https://github.com/jgowdy/sso-jwt/releases/download/${tag}/sso-jwt-x86_64-windows.msi|" \
+              -e "s/InstallerSha256: .*/InstallerSha256: ${{ steps.sha.outputs.msi }}/" \
+            winget/JGowdy.sso-jwt.installer.yaml > /tmp/winget/JGowdy.sso-jwt.installer.yaml
+
+          sed -e "s/PackageVersion: .*/PackageVersion: ${version}/" \
+              -e "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/jgowdy/sso-jwt/releases/tag/${tag}|" \
+            winget/JGowdy.sso-jwt.locale.en-US.yaml > /tmp/winget/JGowdy.sso-jwt.locale.en-US.yaml
+
+          echo "Generated winget manifests for ${version}:"
+          cat /tmp/winget/JGowdy.sso-jwt.yaml
+          echo "---"
+          cat /tmp/winget/JGowdy.sso-jwt.installer.yaml
+          echo "---"
+          cat /tmp/winget/JGowdy.sso-jwt.locale.en-US.yaml
+
+      - name: Upload winget manifest
+        uses: actions/upload-artifact@v5
+        with:
+          name: winget-manifest
+          path: /tmp/winget/
