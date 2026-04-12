@@ -180,7 +180,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           version="${tag#v}"
 
-          gh repo clone jgowdy/homebrew-sso-jwt /tmp/tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jgowdy/homebrew-sso-jwt.git" /tmp/tap
           cd /tmp/tap
 
           cat > Formula/sso-jwt.rb << RUBY
