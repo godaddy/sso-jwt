@@ -119,7 +119,11 @@ pub mod mock {
             let plaintext = vec![0xAB_u8; size];
             let encrypted = storage.encrypt(&plaintext).unwrap();
             let decrypted = storage.decrypt(&encrypted).unwrap();
-            assert_eq!(&*decrypted, &plaintext[..], "roundtrip failed for size {size}");
+            assert_eq!(
+                &*decrypted,
+                &plaintext[..],
+                "roundtrip failed for size {size}"
+            );
         }
     }
 

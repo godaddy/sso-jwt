@@ -544,8 +544,7 @@ mod tests {
             "user_code": "12345678",
             "verification_uri": "https://example.com"
         }"#;
-        let resp: DeviceCodeResponse =
-            serde_json::from_str(json).expect("valid device code JSON");
+        let resp: DeviceCodeResponse = serde_json::from_str(json).expect("valid device code JSON");
         assert_eq!(resp.device_code, "minimal");
         assert_eq!(resp.interval, 5);
         assert_eq!(resp.expires_in, 600);
