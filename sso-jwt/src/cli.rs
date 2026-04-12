@@ -211,39 +211,8 @@ fn run_add_server(
     let source = source.ok_or_else(|| anyhow::anyhow!("specify --from-url or --from-github"))?;
 
     let (toml_content, display_source) = if is_github {
-        // Parse owner/repo/path format
-        let parts: Vec<&str> = source.splitn(3, '/').collect();
-        if parts.len() < 3 {
-            bail!("--from-github format: owner/repo/path (e.g. myorg/sso-jwt-config/server.toml)");
-        }
-        let (owner, repo, path) = (parts[0], parts[1], parts[2]);
-
-        // Use GitHub API with auth from `gh auth token` if available
-        let api_url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
-        let gh_token = std::process::Command::new("gh")
-            .args(["auth", "token"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-        let client = reqwest::blocking::Client::new();
-        let mut req = client
-            .get(&api_url)
-            .header("Accept", "application/vnd.github.raw+json")
-            .header("User-Agent", "sso-jwt");
-        if let Some(ref token) = gh_token {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-        let resp = req.send()?;
-
-        if !resp.status().is_success() {
-            bail!(
-                "failed to fetch from GitHub {owner}/{repo}/{path}: HTTP {}",
-                resp.status()
-            );
-        }
-        (resp.text()?, format!("github:{source}"))
+        let content = fetch_from_github(source)?;
+        (content, format!("github:{source}"))
     } else if source.starts_with("http://") || source.starts_with("https://") {
         let resp = reqwest::blocking::get(source)?;
         if !resp.status().is_success() {
@@ -264,6 +233,95 @@ fn run_add_server(
         eprintln!("Set '{label}' as the default server.");
     }
     Ok(())
+}
+
+/// Fetch a file from GitHub using multiple strategies, in order:
+/// 1. `gh` CLI (handles SAML SSO, internal repos, all auth)
+/// 2. GitHub API with `gh auth token` (direct HTTP)
+/// 3. Raw GitHub URL (public repos only)
+/// 4. `git archive` over SSH
+fn fetch_from_github(github_path: &str) -> Result<String> {
+    let parts: Vec<&str> = github_path.splitn(3, '/').collect();
+    if parts.len() < 3 {
+        bail!("--from-github format: owner/repo/path (e.g. myorg/sso-jwt-config/server.toml)");
+    }
+    let (owner, repo, path) = (parts[0], parts[1], parts[2]);
+
+    // Strategy 1: gh CLI -- most reliable, handles all auth types
+    if let Ok(output) = std::process::Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{owner}/{repo}/contents/{path}"),
+            "-H",
+            "Accept: application/vnd.github.raw+json",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let content = String::from_utf8_lossy(&output.stdout).to_string();
+            if !content.is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+
+    // Strategy 2: GitHub API with gh auth token
+    let gh_token = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    if let Some(ref token) = gh_token {
+        let api_url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
+        let client = reqwest::blocking::Client::new();
+        if let Ok(resp) = client
+            .get(&api_url)
+            .header("Accept", "application/vnd.github.raw+json")
+            .header("User-Agent", "sso-jwt")
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+        {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text() {
+                    return Ok(text);
+                }
+            }
+        }
+    }
+
+    // Strategy 3: Raw GitHub URL (works for public repos)
+    let raw_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
+    if let Ok(resp) = reqwest::blocking::get(&raw_url) {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text() {
+                return Ok(text);
+            }
+        }
+    }
+
+    // Strategy 4: git archive over SSH, piped through tar
+    let shell_cmd = format!(
+        "git archive --remote=git@github.com:{owner}/{repo}.git HEAD {path} | tar -xO {path}"
+    );
+    if let Ok(output) = std::process::Command::new("sh")
+        .args(["-c", &shell_cmd])
+        .output()
+    {
+        if output.status.success() {
+            let content = String::from_utf8_lossy(&output.stdout).to_string();
+            if !content.is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+
+    bail!(
+        "failed to fetch {owner}/{repo}/{path} from GitHub.\n\
+         Tried: gh CLI, GitHub API, raw URL, git archive.\n\
+         Make sure you have access to the repo (try: gh auth login)"
+    )
 }
 
 fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
