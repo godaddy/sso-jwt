@@ -7,6 +7,7 @@ enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
 enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows" }
 enclaveapp-bridge = { path = "../libenclaveapp/crates/enclaveapp-bridge" }
+enclaveapp-software = { path = "../libenclaveapp/crates/enclaveapp-software", features = ["encryption", "keyring-storage"] }
 enclaveapp-wsl = { path = "../libenclaveapp/crates/enclaveapp-wsl" }
 
 [workspace.lints.rust]

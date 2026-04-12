@@ -25,7 +25,8 @@ enclaveapp-core = { workspace = true }
 enclaveapp-windows = { workspace = true, features = ["encryption"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service"] }
+enclaveapp-core = { workspace = true }
+enclaveapp-software = { workspace = true }
 enclaveapp-bridge = { workspace = true }
 enclaveapp-wsl = { workspace = true }
 
