@@ -1,6 +1,6 @@
 [package]
 name = "sso-jwt-tpm-bridge"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Windows TPM 2.0 bridge for sso-jwt WSL support"
 license = "MIT"
