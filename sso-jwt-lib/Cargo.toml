@@ -1,9 +1,9 @@
 [package]
 name = "sso-jwt-lib"
-version = "0.5.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "SSO JWT core library with hardware-backed secure caching"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 anyhow = "1"

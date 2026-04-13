@@ -1,9 +1,9 @@
 [package]
 name = "sso-jwt-tpm-bridge"
-version = "0.5.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Windows TPM 2.0 bridge for sso-jwt WSL support"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

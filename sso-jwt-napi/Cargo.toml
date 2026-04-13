@@ -1,9 +1,9 @@
 [package]
 name = "sso-jwt-napi"
-version = "0.5.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Node.js native binding for sso-jwt (napi-rs)"
-license = "MIT"
+license.workspace = true
 
 [lib]
 crate-type = ["cdylib"]

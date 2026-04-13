@@ -2,6 +2,11 @@
 members = ["sso-jwt", "sso-jwt-lib", "sso-jwt-napi", "sso-jwt-tpm-bridge"]
 resolver = "2"
 
+[workspace.package]
+version = "0.5.1"
+edition = "2021"
+license = "MIT"
+
 [workspace.dependencies]
 enclaveapp-core = { path = "../crates/enclaveapp-core" }
 enclaveapp-apple = { path = "../crates/enclaveapp-apple" }

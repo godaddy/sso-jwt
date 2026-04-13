@@ -1,9 +1,12 @@
 [package]
 name = "sso-jwt"
-version = "0.5.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "SSO JWT CLI with hardware-backed secure caching"
-license = "MIT"
+license.workspace = true
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 anyhow = "1"
