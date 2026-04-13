@@ -57,8 +57,8 @@ pub struct Cli {
 pub enum Commands {
     /// Print shell integration script for export detection
     ShellInit {
-        /// Shell type (auto-detected if omitted)
-        #[arg(value_parser = ["bash", "zsh", "fish"])]
+        /// Shell type (auto-detected if omitted, or pass "auto")
+        #[arg(value_parser = ["bash", "zsh", "fish", "auto"])]
         shell: Option<String>,
     },
 
@@ -104,7 +104,10 @@ pub fn run(cli: Cli) -> Result<()> {
     match &cli.command {
         Some(Commands::ShellInit { shell }) => {
             let detected = shell_init::detect_shell();
-            let shell_name = shell.as_deref().unwrap_or(&detected);
+            let shell_name = match shell.as_deref() {
+                Some("auto") | None => &detected,
+                Some(s) => s,
+            };
             print!("{}", shell_init::generate(shell_name));
             return Ok(());
         }
