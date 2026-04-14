@@ -48,6 +48,17 @@ fn system_time_secs(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
+fn normalize_risk_level(risk_level: u8) -> u8 {
+    match risk_level {
+        1..=3 => risk_level,
+        _ => 2,
+    }
+}
+
+fn effective_cached_risk_level(header_risk_level: u8, configured_risk_level: u8) -> u8 {
+    normalize_risk_level(header_risk_level).max(normalize_risk_level(configured_risk_level))
+}
+
 /// Per-token expiration max age in seconds.
 pub fn max_age_secs(risk_level: u8) -> u64 {
     match risk_level {
@@ -197,6 +208,18 @@ fn read_ciphertext(path: &Path, expected_len: u32) -> Result<Vec<u8>> {
     Ok(data[HEADER_SIZE..HEADER_SIZE + expected_len as usize].to_vec())
 }
 
+fn remove_cache_copy(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).context("failed to remove superseded cache file")
+}
+
+#[allow(clippy::print_stderr)]
+fn warn_cache_cleanup_failure(error: &anyhow::Error) {
+    eprintln!("warning: {error}");
+}
+
 fn maybe_migrate_cache_path(
     config: &Config,
     current_path: &Path,
@@ -204,15 +227,19 @@ fn maybe_migrate_cache_path(
     token: &str,
     risk_level: u8,
     session_start: u64,
-) {
+) -> Result<()> {
     let primary_path = config.cache_file_path();
     if current_path == primary_path {
-        return;
+        return Ok(());
     }
 
     if write_cache(&primary_path, storage, token, risk_level, session_start).is_ok() {
-        drop(fs::remove_file(current_path));
+        if let Err(error) = remove_cache_copy(current_path) {
+            warn_cache_cleanup_failure(&error);
+        }
     }
+
+    Ok(())
 }
 
 /// Write a cache file with the given token.
@@ -252,11 +279,49 @@ pub fn write_cache(
 
 /// Delete the cache file.
 pub fn clear(config: &Config) -> Result<()> {
-    for path in config.cache_lookup_paths() {
+    for path in config.cache_clear_paths() {
         if path.exists() {
             fs::remove_file(&path).context("failed to remove cache file")?;
         }
     }
+    Ok(())
+}
+
+/// Remove legacy cache files that use the deprecated pre-encoded filename scheme.
+///
+/// This is intended for explicit user-triggered secret purges at the CLI layer.
+/// Canonical cache files (`server=...`) are preserved.
+pub fn purge_deprecated_legacy_cache_files() -> Result<()> {
+    let cache_dir = Config::cache_dir();
+    let entries = match fs::read_dir(&cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("failed to read cache directory"),
+    };
+
+    for entry in entries {
+        let entry = entry.context("failed to read cache directory entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().is_none_or(|extension| extension != "enc") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with("server=") {
+            continue;
+        }
+        fs::remove_file(&path).with_context(|| {
+            format!(
+                "failed to remove deprecated legacy cache file {}",
+                path.display()
+            )
+        })?;
+    }
+
     Ok(())
 }
 
@@ -277,7 +342,9 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
     let header = read_header(&cache_path)?;
 
     if let Some(header) = header {
-        let state = classify_token(header.token_iat, header.session_start, config.risk_level);
+        let effective_risk_level =
+            effective_cached_risk_level(header.risk_level, config.risk_level);
+        let state = classify_token(header.token_iat, header.session_start, effective_risk_level);
 
         match state {
             TokenState::Fresh => {
@@ -293,9 +360,9 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                     &cache_path,
                     storage,
                     &token,
-                    config.risk_level,
+                    effective_risk_level,
                     header.session_start,
-                );
+                )?;
                 return Ok(token);
             }
 
@@ -317,16 +384,18 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                                 &primary_cache_path,
                                 storage,
                                 &new_token,
-                                config.risk_level,
+                                normalize_risk_level(config.risk_level),
                                 header.session_start,
                             )?;
                             if cache_path != primary_cache_path {
-                                drop(fs::remove_file(&cache_path));
+                                if let Err(error) = remove_cache_copy(&cache_path) {
+                                    warn_cache_cleanup_failure(&error);
+                                }
                             }
                             return Ok(new_token);
                         }
                         None => {
-                            let remaining_secs = max_age_secs(config.risk_level)
+                            let remaining_secs = max_age_secs(effective_risk_level)
                                 .saturating_sub(now_secs().saturating_sub(header.token_iat));
                             let remaining_min = remaining_secs / 60;
                             eprintln!(
@@ -337,9 +406,9 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                                 &cache_path,
                                 storage,
                                 &token,
-                                config.risk_level,
+                                effective_risk_level,
                                 header.session_start,
-                            );
+                            )?;
                             return Ok(token);
                         }
                     }
@@ -349,9 +418,9 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                         &cache_path,
                         storage,
                         &token,
-                        config.risk_level,
+                        effective_risk_level,
                         header.session_start,
-                    );
+                    )?;
                     return Ok(token);
                 }
             }
@@ -372,11 +441,13 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                             &primary_cache_path,
                             storage,
                             &new_token,
-                            config.risk_level,
+                            normalize_risk_level(config.risk_level),
                             header.session_start,
                         )?;
                         if cache_path != primary_cache_path {
-                            drop(fs::remove_file(&cache_path));
+                            if let Err(error) = remove_cache_copy(&cache_path) {
+                                warn_cache_cleanup_failure(&error);
+                            }
                         }
                         return Ok(new_token);
                     }
@@ -405,11 +476,13 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
         &primary_cache_path,
         storage,
         &token,
-        config.risk_level,
+        normalize_risk_level(config.risk_level),
         token_iat, // session_start = token_iat for fresh auth
     )?;
     if cache_path != primary_cache_path {
-        drop(fs::remove_file(&cache_path));
+        if let Err(error) = remove_cache_copy(&cache_path) {
+            warn_cache_cleanup_failure(&error);
+        }
     }
 
     Ok(token)
@@ -426,6 +499,10 @@ mod tests {
     struct TestConfigDirGuard {
         prev_xdg: Option<OsString>,
         prev_home: Option<OsString>,
+        prev_appdata: Option<OsString>,
+        prev_local_app_data: Option<OsString>,
+        prev_user_profile: Option<OsString>,
+        prev_test_config_dir: Option<OsString>,
     }
 
     impl Drop for TestConfigDirGuard {
@@ -438,17 +515,45 @@ mod tests {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
             }
+            match self.prev_appdata.take() {
+                Some(value) => std::env::set_var("APPDATA", value),
+                None => std::env::remove_var("APPDATA"),
+            }
+            match self.prev_local_app_data.take() {
+                Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+            match self.prev_user_profile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.prev_test_config_dir.take() {
+                Some(value) => std::env::set_var("SSOJWT_TEST_CONFIG_DIR", value),
+                None => std::env::remove_var("SSOJWT_TEST_CONFIG_DIR"),
+            }
         }
     }
 
     fn isolate_config_dir(dir: &tempfile::TempDir) -> TestConfigDirGuard {
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let prev_home = std::env::var_os("HOME");
+        let prev_appdata = std::env::var_os("APPDATA");
+        let prev_local_app_data = std::env::var_os("LOCALAPPDATA");
+        let prev_user_profile = std::env::var_os("USERPROFILE");
+        let prev_test_config_dir = std::env::var_os("SSOJWT_TEST_CONFIG_DIR");
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("APPDATA", dir.path());
+        std::env::set_var("LOCALAPPDATA", dir.path());
+        std::env::set_var("USERPROFILE", dir.path());
+        std::env::set_var("SSOJWT_TEST_CONFIG_DIR", dir.path());
         TestConfigDirGuard {
             prev_xdg,
             prev_home,
+            prev_appdata,
+            prev_local_app_data,
+            prev_user_profile,
+            prev_test_config_dir,
         }
     }
 
@@ -589,6 +694,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn effective_cached_risk_level_uses_stricter_policy() {
+        assert_eq!(effective_cached_risk_level(1, 3), 3);
+        assert_eq!(effective_cached_risk_level(3, 1), 3);
+        assert_eq!(effective_cached_risk_level(2, 2), 2);
+        assert_eq!(effective_cached_risk_level(0, 1), 2);
+        assert_eq!(effective_cached_risk_level(3, 99), 3);
+    }
+
+    #[test]
+    fn cached_token_lifetime_does_not_weaken_when_config_changes() {
+        let now = 1700000000;
+        let token_iat = now - 4000;
+        let session_start = token_iat;
+
+        assert_eq!(
+            classify_token_at(
+                now,
+                token_iat,
+                session_start,
+                effective_cached_risk_level(3, 1),
+            ),
+            TokenState::Dead
+        );
+        assert_eq!(
+            classify_token_at(
+                now,
+                token_iat,
+                session_start,
+                effective_cached_risk_level(1, 1),
+            ),
+            TokenState::Fresh
+        );
+    }
+
     // ---- Cache file format tests ----
 
     #[test]
@@ -659,7 +799,11 @@ mod tests {
 
     #[test]
     fn clear_removes_file() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let dir = tempfile::tempdir().unwrap();
+        let _guard = isolate_config_dir(&dir);
         let path = dir.path().join("default.enc");
         fs::write(&path, b"dummy").unwrap();
         assert!(path.exists());
@@ -1280,6 +1424,107 @@ mod tests {
     }
 
     #[test]
+    fn clear_preserves_ambiguous_hyphenated_legacy_cache_path() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let config = Config {
+            server: "alpha-prod".to_string(),
+            environment: Some("west-2".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "cache-main".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        let legacy_path = Config::cache_dir().join("alpha-prod-west-2-cache-main.enc");
+        fs::create_dir_all(legacy_path.parent().expect("legacy parent")).expect("mkdir");
+        fs::write(&legacy_path, b"legacy-cache").expect("write legacy cache");
+
+        clear(&config).expect("clear cache");
+        assert!(legacy_path.exists());
+    }
+
+    #[test]
+    fn purge_deprecated_legacy_cache_files_removes_ambiguous_legacy_aliases() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let canonical = Config::cache_dir().join("server=alpha--cache=default.enc");
+        let legacy = Config::cache_dir().join("alpha-prod-west-2-cache-main.enc");
+        fs::create_dir_all(Config::cache_dir()).expect("mkdir");
+        fs::write(&canonical, b"canonical").expect("write canonical");
+        fs::write(&legacy, b"legacy").expect("write legacy");
+
+        purge_deprecated_legacy_cache_files().expect("purge deprecated legacy caches");
+
+        assert!(canonical.exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn remove_cache_copy_reports_delete_failures() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("legacy.enc");
+        fs::create_dir(&path).expect("create obstructing directory");
+
+        let err = remove_cache_copy(&path).expect_err("directory removal should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to remove superseded cache file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn maybe_migrate_cache_path_keeps_valid_token_when_cleanup_fails() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let token = make_jwt(now_secs());
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+        let obstructing_legacy = dir.path().join("legacy-dir.enc");
+        fs::create_dir(&obstructing_legacy).expect("create obstructing legacy path");
+
+        maybe_migrate_cache_path(
+            &config,
+            &obstructing_legacy,
+            &storage,
+            &token,
+            config.risk_level,
+            now_secs(),
+        )
+        .expect("cleanup failure should not bubble up");
+
+        assert!(config.cache_file_path().exists());
+        assert!(obstructing_legacy.is_dir());
+    }
+
+    #[test]
     fn resolve_token_reads_legacy_cache_path() {
         let _lock = crate::config::TEST_ENV_MUTEX
             .lock()
@@ -1324,6 +1569,39 @@ mod tests {
         assert_eq!(resolved, token);
         assert!(config.cache_file_path().exists());
         assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn resolve_token_ignores_ambiguous_hyphenated_legacy_cache_path() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "alpha-prod".to_string(),
+            environment: Some("west-2".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "cache-main".to_string(),
+            no_open: false,
+            clear: false,
+        };
+        let legacy_path = Config::cache_dir().join("alpha-prod-west-2-cache-main.enc");
+
+        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
+            .expect("write legacy cache");
+
+        resolve_token(&config, &storage).expect_err("ambiguous legacy cache should be ignored");
+        assert!(!config.cache_file_path().exists());
+        assert!(legacy_path.exists());
     }
 
     #[test]

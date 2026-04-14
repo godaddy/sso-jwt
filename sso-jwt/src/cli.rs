@@ -139,20 +139,21 @@ pub fn run(cli: Cli) -> Result<()> {
         _ => {}
     }
 
+    // Handle --clear before full config resolution. Cache deletion only depends on
+    // local naming inputs, so it should still work when the server profile is gone,
+    // the config file is malformed, or the server config is temporarily invalid.
+    if cli.clear && cli.command.is_none() {
+        let mut config = Config::load_for_clear();
+        apply_cli_overrides(&mut config, &cli);
+        cache::clear(&config)?;
+        cache::purge_deprecated_legacy_cache_files()?;
+        eprintln!("Cache cleared.");
+        return Ok(());
+    }
+
     // Load config, apply CLI overrides, and resolve server profile
     let mut config = Config::load()?;
     apply_cli_overrides(&mut config, &cli);
-
-    // Handle --clear before resolve_server() so it works even with no server configured.
-    if config.clear && cli.command.is_none() {
-        if config.resolve_server().is_ok() {
-            cache::clear(&config)?;
-            eprintln!("Cache cleared.");
-        } else {
-            eprintln!("No server configured. Nothing to clear.");
-        }
-        return Ok(());
-    }
 
     config.resolve_server()?;
 
@@ -489,9 +490,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::thread;
 
     static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
     fn temp_script(name: &str, body: &str) -> PathBuf {
@@ -564,6 +567,63 @@ mod tests {
             cache_name: "default".to_string(),
             no_open: false,
             clear: false,
+        }
+    }
+
+    struct TestEnvGuard {
+        prev_xdg: Option<std::ffi::OsString>,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    struct TestConfigDir {
+        path: PathBuf,
+    }
+
+    impl TestConfigDir {
+        fn new(name: &str) -> Self {
+            let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "sso-jwt-cli-config-{}-{}-{name}",
+                std::process::id(),
+                id
+            ));
+            drop(fs::remove_dir_all(&path));
+            fs::create_dir_all(&path).expect("create temp config dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestConfigDir {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.path));
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match self.prev_xdg.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match self.prev_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn isolate_config_dir(dir: &TestConfigDir) -> TestEnvGuard {
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("HOME", dir.path());
+        TestEnvGuard {
+            prev_xdg,
+            prev_home,
         }
     }
 
@@ -890,6 +950,93 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("cleartext HTTP"));
+    }
+
+    #[test]
+    fn run_clear_succeeds_without_resolving_server() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let dir = TestConfigDir::new("clear");
+        let _guard = isolate_config_dir(&dir);
+
+        let config = Config {
+            server: "clear-test".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: String::new(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "cache-main".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        let primary = config.cache_file_path();
+        let legacy = Config::cache_dir().join("clear-test-prod-cache-main.enc");
+        fs::create_dir_all(primary.parent().expect("cache parent")).expect("mkdir");
+        fs::write(&primary, b"primary").expect("write primary");
+        fs::write(&legacy, b"legacy").expect("write legacy");
+
+        run(Cli {
+            server: Some("clear-test".to_string()),
+            environment: Some("prod".to_string()),
+            cache_name: "cache-main".to_string(),
+            risk_level: 2,
+            oauth_url: None,
+            biometric: false,
+            no_open: false,
+            clear: true,
+            command: None,
+        })
+        .expect("clear should succeed without server resolution");
+
+        assert!(!primary.exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn run_clear_ignores_malformed_config_and_purges_deprecated_legacy_caches() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let dir = TestConfigDir::new("clear-malformed-config");
+        let _guard = isolate_config_dir(&dir);
+        fs::create_dir_all(Config::config_dir()).expect("mkdir config dir");
+        fs::write(Config::config_file_path(), "not = [valid").expect("write malformed config");
+
+        let config = Config {
+            server: "clear-test".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: String::new(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "cache-main".to_string(),
+            no_open: false,
+            clear: false,
+        };
+        let primary = config.cache_file_path();
+        let legacy = Config::cache_dir().join("clear-test-prod-cache-main.enc");
+        fs::create_dir_all(primary.parent().expect("cache parent")).expect("mkdir");
+        fs::write(&primary, b"primary").expect("write primary");
+        fs::write(&legacy, b"legacy").expect("write legacy");
+
+        run(Cli {
+            server: Some("clear-test".to_string()),
+            environment: Some("prod".to_string()),
+            cache_name: "cache-main".to_string(),
+            risk_level: 2,
+            oauth_url: None,
+            biometric: false,
+            no_open: false,
+            clear: true,
+            command: None,
+        })
+        .expect("clear should ignore malformed config");
+
+        assert!(!primary.exists());
+        assert!(!legacy.exists());
     }
 
     #[test]
