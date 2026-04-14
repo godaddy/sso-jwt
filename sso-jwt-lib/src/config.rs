@@ -623,6 +623,8 @@ mod tests {
 
     #[test]
     fn missing_server_returns_error() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
         let mut cfg = test_config();
         cfg.server = "nonexistent".to_string();
         // oauth_url is empty and no config file, so resolve_server should fail
