@@ -54,16 +54,16 @@ fn convert_options(options: Option<JwtOptions>) -> napi::Result<sso_jwt_lib::Get
                 }
             }
             Ok(sso_jwt_lib::GetJwtOptions {
-            server: o.server,
-            env: o.env,
-            oauth_url: o.oauth_url,
-            token_url: o.token_url,
-            heartbeat_url: o.heartbeat_url,
-            client_id: o.client_id,
-            cache_name: o.cache_name,
-            risk_level: o.risk_level.map(|v| v as u8),
-            biometric: o.biometric,
-            no_open: o.no_open,
+                server: o.server,
+                env: o.env,
+                oauth_url: o.oauth_url,
+                token_url: o.token_url,
+                heartbeat_url: o.heartbeat_url,
+                client_id: o.client_id,
+                cache_name: o.cache_name,
+                risk_level: o.risk_level.map(|v| v as u8),
+                biometric: o.biometric,
+                no_open: o.no_open,
             })
         }
     }

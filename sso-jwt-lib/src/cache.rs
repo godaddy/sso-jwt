@@ -45,9 +45,7 @@ fn now_secs() -> u64 {
 }
 
 fn system_time_secs(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Per-token expiration max age in seconds.

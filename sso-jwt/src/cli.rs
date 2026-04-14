@@ -290,8 +290,7 @@ fn fetch_from_github(github_path: &str, client: &reqwest::blocking::Client) -> R
     bail!(
         "failed to fetch {github_path} from GitHub.\n\
          Tried: gh CLI and raw.githubusercontent.com using ref '{}'.\n\
-         Make sure you have access to the repo (try: gh auth login)"
-        ,
+         Make sure you have access to the repo (try: gh auth login)",
         source.r#ref
     )
 }
@@ -301,7 +300,9 @@ fn blocking_http_client() -> Result<reqwest::blocking::Client> {
 }
 
 fn blocking_http_client_with_timeout(timeout: Duration) -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder().timeout(timeout).build()?)
+    Ok(reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()?)
 }
 
 fn fetch_url_text(client: &reqwest::blocking::Client, source: &str) -> Result<String> {
@@ -745,9 +746,14 @@ mod tests {
 
     #[test]
     fn run_add_server_rejects_cleartext_http() {
-        let err =
-            run_add_server("label", Some("http://example.com/config.toml"), false, false, false)
-                .unwrap_err();
+        let err = run_add_server(
+            "label",
+            Some("http://example.com/config.toml"),
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("cleartext HTTP"));
     }
 

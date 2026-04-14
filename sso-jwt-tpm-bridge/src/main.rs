@@ -20,7 +20,11 @@ fn handle_request(
     match request.method.as_str() {
         "init" => {
             let biometric = request.params.biometric;
-            match tpm::TpmStorage::new(biometric) {
+            match tpm::TpmStorage::new(
+                &request.params.app_name,
+                &request.params.key_label,
+                biometric,
+            ) {
                 Ok(s) => {
                     *storage = Some(s);
                     BridgeResponse::success("ok")
@@ -65,8 +69,13 @@ fn handle_request(
             }
         }
         "destroy" | "delete" => {
-            *storage = None;
-            BridgeResponse::success("ok")
+            match tpm::TpmStorage::delete(&request.params.app_name, &request.params.key_label) {
+                Ok(()) => {
+                    *storage = None;
+                    BridgeResponse::success("ok")
+                }
+                Err(e) => BridgeResponse::error(&format!("delete failed: {e}")),
+            }
         }
         other => BridgeResponse::error(&format!("unknown method: {other}")),
     }
@@ -123,6 +132,7 @@ mod tests {
                 data: data.to_string(),
                 biometric,
                 app_name: "sso-jwt".to_string(),
+                key_label: "cache-key".to_string(),
             },
         }
     }
@@ -133,6 +143,7 @@ mod tests {
         let req: BridgeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "init");
         assert!(!req.params.biometric);
+        assert_eq!(req.params.key_label, "");
     }
 
     #[test]
@@ -142,6 +153,7 @@ mod tests {
         assert_eq!(req.method, "init");
         assert!(!req.params.biometric);
         assert!(req.params.data.is_empty());
+        assert!(req.params.key_label.is_empty());
     }
 
     #[test]
@@ -162,9 +174,10 @@ mod tests {
 
     #[test]
     fn parse_delete_request() {
-        let json = r#"{"method": "delete", "params": {}}"#;
+        let json = r#"{"method": "delete", "params": {"key_label": "cache-key"}}"#;
         let req: BridgeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "delete");
+        assert_eq!(req.params.key_label, "cache-key");
     }
 
     #[test]
@@ -212,6 +225,15 @@ mod tests {
     }
 
     #[test]
+    fn handle_delete_clears_storage() {
+        let req = make_request("delete", "", false);
+        let mut storage = None;
+        let resp = handle_request(&req, &mut storage);
+        assert!(resp.result.is_some());
+        assert!(storage.is_none());
+    }
+
+    #[test]
     fn handle_unknown_method() {
         let req = make_request("bogus", "", false);
         let mut storage = None;
@@ -249,7 +271,7 @@ mod tests {
         let req = make_request("encrypt", "", false);
         // On platforms without a TPM, new() may fail and storage is None,
         // so we get "not initialized" instead of "missing data". Both are valid errors.
-        let mut storage = tpm::TpmStorage::new(false).ok();
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
@@ -257,7 +279,7 @@ mod tests {
     #[test]
     fn handle_encrypt_invalid_base64() {
         let req = make_request("encrypt", "not-valid-base64!!!", false);
-        let mut storage = tpm::TpmStorage::new(false).ok();
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
@@ -265,7 +287,7 @@ mod tests {
     #[test]
     fn handle_decrypt_missing_data() {
         let req = make_request("decrypt", "", false);
-        let mut storage = tpm::TpmStorage::new(false).ok();
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
@@ -273,7 +295,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn encrypt_returns_platform_error_on_non_windows() {
-        let storage = tpm::TpmStorage::new(false).unwrap();
+        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).unwrap();
         let result = storage.encrypt(b"hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only supported on Windows"));
@@ -282,7 +304,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn decrypt_returns_platform_error_on_non_windows() {
-        let storage = tpm::TpmStorage::new(false).unwrap();
+        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).unwrap();
         let result = storage.decrypt(b"hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only supported on Windows"));
@@ -291,10 +313,10 @@ mod tests {
     #[test]
     fn roundtrip_json_protocol() {
         // Simulate the full JSON protocol flow
-        let init_json = r#"{"method":"init","params":{"biometric":false}}"#;
-        let encrypt_json =
-            r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","biometric":false}}"#;
-        let destroy_json = r#"{"method":"destroy","params":{}}"#;
+        let init_json = r#"{"method":"init","params":{"app_name":"sso-jwt","key_label":"cache-key","biometric":false}}"#;
+        let encrypt_json = r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","app_name":"sso-jwt","key_label":"cache-key","biometric":false}}"#;
+        let destroy_json =
+            r#"{"method":"destroy","params":{"app_name":"sso-jwt","key_label":"cache-key"}}"#;
 
         let mut storage = None;
 
