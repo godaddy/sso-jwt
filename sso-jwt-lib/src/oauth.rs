@@ -41,7 +41,7 @@ pub fn get_device_code(
         .post(oauth_url)
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json")
-        .body(format!("client_id={client_id}"))
+        .form(&[("client_id", client_id)])
         .send()
         .context("failed to request device code")?;
 
@@ -91,9 +91,11 @@ pub fn poll_for_token(
             .post(url)
             .header("content-type", "application/x-www-form-urlencoded")
             .header("accept", "application/json")
-            .body(format!(
-                "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id={client_id}&device_code={device_code}"
-            ))
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("client_id", client_id),
+                ("device_code", device_code),
+            ])
             .send()
             .context("failed to poll for token")?;
 
@@ -123,12 +125,13 @@ pub fn poll_for_token(
 
 /// Format the user code for display (XXXX-XXXX).
 pub fn format_user_code(code: &str) -> String {
-    if code.len() >= 8 {
-        let upper = code.to_uppercase();
-        format!("{}-{}", &upper[..4], &upper[4..8])
-    } else {
-        code.to_uppercase()
-    }
+    let upper = code.to_uppercase();
+    upper
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Open the verification URI in the user's default browser.
@@ -139,7 +142,14 @@ pub fn open_browser(uri: &str) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) => {
             if let Ok(browser) = std::env::var("BROWSER") {
-                std::process::Command::new(&browser)
+                let mut parts = shell_words::split(&browser)
+                    .with_context(|| format!("failed to parse $BROWSER ({browser})"))?;
+                let program = parts
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("$BROWSER is set but empty"))?;
+                std::process::Command::new(program)
+                    .args(parts.drain(1..))
                     .arg(uri)
                     .spawn()
                     .with_context(|| format!("failed to open browser via $BROWSER ({browser})"))?;
@@ -263,7 +273,7 @@ mod tests {
 
     #[test]
     fn format_user_code_longer_than_eight() {
-        assert_eq!(format_user_code("abcdefghij"), "ABCD-EFGH");
+        assert_eq!(format_user_code("abcdefghij"), "ABCD-EFGH-IJ");
     }
 
     #[test]
@@ -366,6 +376,11 @@ mod tests {
     #[test]
     fn format_user_code_mixed_case_and_numbers() {
         assert_eq!(format_user_code("aB3dEf9H"), "AB3D-EF9H");
+    }
+
+    #[test]
+    fn format_user_code_long_values_keep_all_characters() {
+        assert_eq!(format_user_code("abcdefghijkl"), "ABCD-EFGH-IJKL");
     }
 
     #[test]
@@ -579,5 +594,68 @@ mod tests {
             err_msg.contains("500"),
             "error should mention status code, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn get_device_code_url_encodes_client_id() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/")
+            .match_body("client_id=client%2Fid%2Bwith+spaces")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "device_code": "dev123",
+                    "user_code": "ABCD1234",
+                    "verification_uri": "https://example.com/verify"
+                }"#,
+            )
+            .create();
+
+        let client = reqwest::blocking::Client::new();
+        drop(
+            get_device_code(&client, &server.url(), "client/id+with spaces")
+                .expect("device code request should succeed"),
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn poll_for_token_url_encodes_parameters() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::Regex("client_id=client%2Fid%2Bwith\\+spaces".to_string()),
+                mockito::Matcher::Regex("device_code=device%2Bcode%2Fvalue".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"tok"}"#)
+            .create();
+
+        let client = reqwest::blocking::Client::new();
+        let url = format!("{}/token", server.url());
+        drop(
+            poll_for_token(
+                &client,
+                &url,
+                None,
+                "client/id+with spaces",
+                "device+code/value",
+                0,
+                10,
+            )
+            .expect("token poll should succeed"),
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn browser_command_parser_handles_flags() {
+        let parts =
+            shell_words::split("firefox --private-window").expect("browser command should parse");
+        assert_eq!(parts, vec!["firefox", "--private-window"]);
     }
 }

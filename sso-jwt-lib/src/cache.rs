@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
+use enclaveapp_core::metadata;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,10 +41,11 @@ pub struct CacheHeader {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs()
+    system_time_secs(SystemTime::now())
+}
+
+fn system_time_secs(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Per-token expiration max age in seconds.
@@ -214,19 +216,18 @@ pub fn write_cache(
         fs::create_dir_all(parent).context("failed to create cache directory")?;
     }
 
-    let mut file = fs::File::create(path).context("failed to create cache file")?;
+    let mut data = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
+    data.extend_from_slice(MAGIC);
+    data.push(FORMAT_VERSION);
+    data.push(risk_level);
+    data.extend_from_slice(&token_iat.to_be_bytes());
+    data.extend_from_slice(&session_start.to_be_bytes());
+    data.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    data.extend_from_slice(&ciphertext);
 
-    // Write header
-    file.write_all(MAGIC)?;
-    file.write_all(&[FORMAT_VERSION])?;
-    file.write_all(&[risk_level])?;
-    file.write_all(&token_iat.to_be_bytes())?;
-    file.write_all(&session_start.to_be_bytes())?;
-    file.write_all(&(ciphertext.len() as u32).to_be_bytes())?;
-
-    // Write ciphertext
-    file.write_all(&ciphertext)?;
-    file.flush()?;
+    metadata::atomic_write(path, &data).context("failed to create cache file")?;
+    #[cfg(unix)]
+    metadata::restrict_file_permissions(path).context("failed to secure cache file")?;
 
     Ok(())
 }
@@ -1134,5 +1135,28 @@ mod tests {
         assert_eq!(max_age_secs(3), 3600);
         assert_eq!(max_age_secs(0), 43200); // default
         assert_eq!(max_age_secs(255), 43200); // default
+    }
+
+    #[test]
+    fn system_time_before_epoch_returns_zero() {
+        let time = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("pre-epoch time");
+        assert_eq!(system_time_secs(time), 0);
+    }
+
+    #[test]
+    fn write_cache_ignores_preexisting_legacy_tmp_file() {
+        use enclaveapp_app_storage::mock::MockEncryptionStorage as MockStorage;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("token.enc");
+        fs::write(dir.path().join(".token.enc.tmp"), b"stale").expect("write stale temp file");
+
+        let storage = MockStorage::new();
+        write_cache(&path, &storage, "header.payload.signature", 2, 1700000000)
+            .expect("write cache");
+
+        assert!(read_header(&path).expect("read header").is_some());
     }
 }

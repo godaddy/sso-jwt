@@ -2,9 +2,12 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use enclaveapp_app_storage::{create_encryption_storage, AccessPolicy, StorageConfig};
 use sso_jwt_lib::{cache, config::Config};
+use std::time::Duration;
 
 use crate::exec;
 use crate::shell_init;
+
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 #[command(
@@ -89,7 +92,7 @@ pub enum Commands {
         #[arg(long, group = "source")]
         from_url: Option<String>,
 
-        /// GitHub repo path: owner/repo/file.toml (fetches via GitHub API)
+        /// GitHub repo path pinned to a ref: owner/repo@ref/file.toml
         #[arg(long, group = "source")]
         from_github: Option<String>,
 
@@ -223,19 +226,15 @@ fn run_add_server(
     force: bool,
 ) -> Result<()> {
     let source = source.ok_or_else(|| anyhow::anyhow!("specify --from-url or --from-github"))?;
+    let client = blocking_http_client()?;
 
     let (toml_content, display_source) = if is_github {
-        let content = fetch_from_github(source)?;
+        let content = fetch_from_github(source, &client)?;
         (content, format!("github:{source}"))
-    } else if source.starts_with("http://") || source.starts_with("https://") {
-        let resp = reqwest::blocking::get(source)?;
-        if !resp.status().is_success() {
-            bail!(
-                "failed to fetch server config from {source}: HTTP {}",
-                resp.status()
-            );
-        }
-        (resp.text()?, source.to_string())
+    } else if source.starts_with("http://") {
+        bail!("refusing to fetch server config over cleartext HTTP: {source}");
+    } else if source.starts_with("https://") {
+        (fetch_url_text(&client, source)?, source.to_string())
     } else {
         (std::fs::read_to_string(source)?, source.to_string())
     };
@@ -250,50 +249,32 @@ fn run_add_server(
 }
 
 /// Fetch a file from GitHub using multiple strategies, in order:
-/// 1. Raw GitHub URL (fast, no auth, works for public repos)
-/// 2. `git archive` over SSH (most users have SSH keys)
-/// 3. `gh` CLI via `gh api` (handles SAML SSO, internal repos, PATs)
-fn fetch_from_github(github_path: &str) -> Result<String> {
-    let parts: Vec<&str> = github_path.splitn(3, '/').collect();
-    if parts.len() < 3 {
-        bail!("--from-github format: owner/repo/path (e.g. myorg/sso-jwt-config/server.toml)");
-    }
-    let (owner, repo, path) = (parts[0], parts[1], parts[2]);
+/// 1. Raw GitHub URL using an explicit pinned ref
+/// 2. `gh` CLI via `gh api` (handles SAML SSO, internal repos, PATs)
+fn fetch_from_github(github_path: &str, client: &reqwest::blocking::Client) -> Result<String> {
+    let source = GitHubSource::parse(github_path)?;
 
     // Strategy 1: Raw GitHub URL (fast, no auth needed for public repos)
-    let raw_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
-    if let Ok(resp) = reqwest::blocking::get(&raw_url) {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text() {
-                return Ok(text);
-            }
-        }
-    }
-
-    // Strategy 2: git archive over SSH -- most users have SSH keys configured
-    let shell_cmd = format!(
-        "git archive --remote=git@github.com:{owner}/{repo}.git HEAD {path} | tar -xO {path}"
+    let raw_url = format!(
+        "https://raw.githubusercontent.com/{}/{}/{}/{}",
+        source.owner, source.repo, source.r#ref, source.path
     );
-    if let Ok(output) = std::process::Command::new("sh")
-        .args(["-c", &shell_cmd])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        if output.status.success() {
-            let content = String::from_utf8_lossy(&output.stdout).to_string();
-            if !content.is_empty() {
-                return Ok(content);
-            }
-        }
+    if let Ok(text) = fetch_url_text(client, &raw_url) {
+        return Ok(text);
     }
 
-    // Strategy 3: gh CLI -- handles SAML SSO, internal repos
+    // Strategy 2: gh CLI -- handles SAML SSO, internal repos
     if let Ok(output) = std::process::Command::new("gh")
         .args([
             "api",
-            &format!("repos/{owner}/{repo}/contents/{path}"),
+            &format!(
+                "repos/{}/{}/contents/{}",
+                source.owner, source.repo, source.path
+            ),
             "-H",
             "Accept: application/vnd.github.raw+json",
+            "-F",
+            &format!("ref={}", source.r#ref),
         ])
         .stderr(std::process::Stdio::null())
         .output()
@@ -307,10 +288,74 @@ fn fetch_from_github(github_path: &str) -> Result<String> {
     }
 
     bail!(
-        "failed to fetch {owner}/{repo}/{path} from GitHub.\n\
-         Tried: gh CLI, GitHub API, raw URL, git archive.\n\
-         Make sure you have access to the repo (try: gh auth login)"
+        "failed to fetch {github_path} from GitHub.\n\
+         Tried: gh CLI and raw.githubusercontent.com using ref '{}'.\n\
+         Make sure you have access to the repo (try: gh auth login)",
+        source.r#ref
     )
+}
+
+fn blocking_http_client() -> Result<reqwest::blocking::Client> {
+    blocking_http_client_with_timeout(HTTP_TIMEOUT)
+}
+
+fn blocking_http_client_with_timeout(timeout: Duration) -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()?)
+}
+
+fn fetch_url_text(client: &reqwest::blocking::Client, source: &str) -> Result<String> {
+    let resp = client.get(source).send()?;
+    if !resp.status().is_success() {
+        bail!(
+            "failed to fetch server config from {source}: HTTP {}",
+            resp.status()
+        );
+    }
+    Ok(resp.text()?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubSource {
+    owner: String,
+    repo: String,
+    r#ref: String,
+    path: String,
+}
+
+impl GitHubSource {
+    fn parse(input: &str) -> Result<Self> {
+        let parts: Vec<&str> = input.splitn(3, '/').collect();
+        if parts.len() < 3 {
+            bail!(
+                "--from-github format: owner/repo@ref/path (e.g. myorg/configs@v1.2.3/server.toml)"
+            );
+        }
+
+        let owner = parts[0];
+        let repo_and_ref = parts[1];
+        let path = parts[2];
+
+        let (repo, r#ref) = repo_and_ref.split_once('@').ok_or_else(|| {
+            anyhow::anyhow!(
+                "--from-github requires a pinned ref: owner/repo@ref/path (for example @v1.2.3 or @<commit>)"
+            )
+        })?;
+
+        if owner.is_empty() || repo.is_empty() || r#ref.is_empty() || path.is_empty() {
+            bail!(
+                "--from-github format: owner/repo@ref/path (e.g. myorg/configs@v1.2.3/server.toml)"
+            );
+        }
+
+        Ok(Self {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            r#ref: r#ref.to_string(),
+            path: path.to_string(),
+        })
+    }
 }
 
 fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
@@ -353,6 +398,9 @@ fn resolve_token(config: &Config) -> Result<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn default_cli() -> Cli {
         Cli {
@@ -678,6 +726,61 @@ mod tests {
         assert!(
             err.contains("--from-url") || err.contains("--from-github"),
             "expected source error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn github_source_requires_pinned_ref() {
+        let err = GitHubSource::parse("owner/repo/path.toml").unwrap_err();
+        assert!(err.to_string().contains("pinned ref"));
+    }
+
+    #[test]
+    fn github_source_parses_owner_repo_ref_and_path() {
+        let source = GitHubSource::parse("owner/repo@v1.2.3/path/to/server.toml").unwrap();
+        assert_eq!(source.owner, "owner");
+        assert_eq!(source.repo, "repo");
+        assert_eq!(source.r#ref, "v1.2.3");
+        assert_eq!(source.path, "path/to/server.toml");
+    }
+
+    #[test]
+    fn run_add_server_rejects_cleartext_http() {
+        let err = run_add_server(
+            "label",
+            Some("http://example.com/config.toml"),
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cleartext HTTP"));
+    }
+
+    #[test]
+    fn fetch_url_text_times_out_for_stalled_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 1024];
+                drop(stream.read(&mut request));
+                thread::sleep(Duration::from_millis(200));
+                drop(stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world",
+                ));
+            }
+        });
+
+        let client = blocking_http_client_with_timeout(Duration::from_millis(50)).unwrap();
+        let error = fetch_url_text(&client, &format!("http://{addr}/config.toml")).unwrap_err();
+        let message = format!("{error:#}").to_ascii_lowercase();
+
+        server.join().unwrap();
+        assert!(
+            message.contains("timed out") || message.contains("timeout"),
+            "unexpected error: {error}"
         );
     }
 }
