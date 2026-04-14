@@ -197,6 +197,24 @@ fn read_ciphertext(path: &Path, expected_len: u32) -> Result<Vec<u8>> {
     Ok(data[HEADER_SIZE..HEADER_SIZE + expected_len as usize].to_vec())
 }
 
+fn maybe_migrate_cache_path(
+    config: &Config,
+    current_path: &Path,
+    storage: &dyn EncryptionStorage,
+    token: &str,
+    risk_level: u8,
+    session_start: u64,
+) {
+    let primary_path = config.cache_file_path();
+    if current_path == primary_path {
+        return;
+    }
+
+    if write_cache(&primary_path, storage, token, risk_level, session_start).is_ok() {
+        drop(fs::remove_file(current_path));
+    }
+}
+
 /// Write a cache file with the given token.
 pub fn write_cache(
     path: &Path,
@@ -248,11 +266,12 @@ pub fn clear(config: &Config) -> Result<()> {
 /// 3. Return cached / refresh / re-auth as appropriate
 #[allow(clippy::print_stderr)]
 pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result<String> {
+    let primary_cache_path = config.cache_file_path();
     let cache_path = config
         .cache_lookup_paths()
         .into_iter()
         .find(|path| path.exists())
-        .unwrap_or_else(|| config.cache_file_path());
+        .unwrap_or_else(|| primary_cache_path.clone());
 
     // Step 1: Read cache header
     let header = read_header(&cache_path)?;
@@ -269,6 +288,14 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                     .context("failed to decrypt cached token")?;
                 let token =
                     String::from_utf8(plaintext).context("cached token is not valid UTF-8")?;
+                maybe_migrate_cache_path(
+                    config,
+                    &cache_path,
+                    storage,
+                    &token,
+                    config.risk_level,
+                    header.session_start,
+                );
                 return Ok(token);
             }
 
@@ -287,12 +314,15 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                         Some(new_token) => {
                             // Cache the refreshed token, preserve session_start
                             write_cache(
-                                &cache_path,
+                                &primary_cache_path,
                                 storage,
                                 &new_token,
                                 config.risk_level,
                                 header.session_start,
                             )?;
+                            if cache_path != primary_cache_path {
+                                drop(fs::remove_file(&cache_path));
+                            }
                             return Ok(new_token);
                         }
                         None => {
@@ -302,10 +332,26 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                             eprintln!(
                                 "warning: token refresh failed, using cached token (expires in {remaining_min}m)"
                             );
+                            maybe_migrate_cache_path(
+                                config,
+                                &cache_path,
+                                storage,
+                                &token,
+                                config.risk_level,
+                                header.session_start,
+                            );
                             return Ok(token);
                         }
                     }
                 } else {
+                    maybe_migrate_cache_path(
+                        config,
+                        &cache_path,
+                        storage,
+                        &token,
+                        config.risk_level,
+                        header.session_start,
+                    );
                     return Ok(token);
                 }
             }
@@ -323,12 +369,15 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
 
                     if let Some(new_token) = oauth::heartbeat_refresh(heartbeat_url, &token) {
                         write_cache(
-                            &cache_path,
+                            &primary_cache_path,
                             storage,
                             &new_token,
                             config.risk_level,
                             header.session_start,
                         )?;
+                        if cache_path != primary_cache_path {
+                            drop(fs::remove_file(&cache_path));
+                        }
                         return Ok(new_token);
                     }
                 }
@@ -353,12 +402,15 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
     let token_iat = jwt::extract_iat(&token).unwrap_or_else(|_| now_secs());
 
     write_cache(
-        &cache_path,
+        &primary_cache_path,
         storage,
         &token,
         config.risk_level,
         token_iat, // session_start = token_iat for fresh auth
     )?;
+    if cache_path != primary_cache_path {
+        drop(fs::remove_file(&cache_path));
+    }
 
     Ok(token)
 }
@@ -1203,8 +1255,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let _guard = isolate_config_dir(&dir);
         let config = Config {
-            server: "a/b".to_string(),
-            environment: None,
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
             oauth_url: "https://example.invalid/oauth".to_string(),
             token_url: None,
             heartbeat_url: None,
@@ -1216,7 +1268,9 @@ mod tests {
             clear: false,
         };
 
-        let legacy_path = config.legacy_cache_file_path();
+        let legacy_path = config
+            .legacy_cache_file_path()
+            .expect("safe config should keep legacy cache lookup");
         fs::create_dir_all(legacy_path.parent().expect("legacy parent")).expect("mkdir");
         fs::write(&legacy_path, b"legacy-cache").expect("write legacy cache");
         assert!(legacy_path.exists());
@@ -1227,6 +1281,53 @@ mod tests {
 
     #[test]
     fn resolve_token_reads_legacy_cache_path() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+        let legacy_path = config
+            .legacy_cache_file_path()
+            .expect("safe config should keep legacy cache lookup");
+
+        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
+            .expect("write legacy cache");
+        assert!(legacy_path.exists());
+        assert!(read_header(&legacy_path)
+            .expect("read legacy header")
+            .is_some());
+        assert!(
+            config
+                .cache_lookup_paths()
+                .iter()
+                .any(|path| path == &legacy_path),
+            "lookup paths should include legacy cache path"
+        );
+
+        let resolved = resolve_token(&config, &storage).expect("resolve token");
+        assert_eq!(resolved, token);
+        assert!(config.cache_file_path().exists());
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn unsafe_configs_do_not_consult_legacy_cache_paths() {
         let _lock = crate::config::TEST_ENV_MUTEX
             .lock()
             .expect("env mutex poisoned");
@@ -1248,24 +1349,18 @@ mod tests {
             no_open: false,
             clear: false,
         };
-        let legacy_path = config.legacy_cache_file_path();
+        let unsafe_legacy_path = Config::cache_dir().join("ab-default.enc");
+        write_cache(
+            &unsafe_legacy_path,
+            &storage,
+            &token,
+            config.risk_level,
+            now,
+        )
+        .expect("write unsafe legacy cache");
 
-        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
-            .expect("write legacy cache");
-        assert!(legacy_path.exists());
-        assert!(read_header(&legacy_path)
-            .expect("read legacy header")
-            .is_some());
-        assert!(
-            config
-                .cache_lookup_paths()
-                .iter()
-                .any(|path| path == &legacy_path),
-            "lookup paths should include legacy cache path"
-        );
-
-        let resolved = resolve_token(&config, &storage).expect("resolve token");
-        assert_eq!(resolved, token);
+        resolve_token(&config, &storage).expect_err("unsafe legacy cache should be ignored");
         assert!(!config.cache_file_path().exists());
+        assert!(unsafe_legacy_path.exists());
     }
 }

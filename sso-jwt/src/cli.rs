@@ -304,6 +304,46 @@ fn read_text_with_limit<R: Read>(mut reader: R, source: &str) -> Result<String> 
     String::from_utf8(bytes).map_err(Into::into)
 }
 
+fn read_child_stdout_with_limit(
+    child: &mut std::process::Child,
+    source: &str,
+    timeout: Duration,
+) -> Result<String> {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("gh output missing stdout"))?;
+    let source = source.to_string();
+    let reader_source = source.clone();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        drop(tx.send(read_text_with_limit(stdout, &reader_source)));
+    });
+
+    let content = match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            drop(child.kill());
+            drop(child.wait());
+            drop(reader.join());
+            bail!("gh CLI timed out fetching server config from {source}");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            drop(child.wait());
+            drop(reader.join());
+            bail!("gh CLI output reader disconnected unexpectedly");
+        }
+    }?;
+
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("gh CLI output reader panicked"))?;
+    Ok(content)
+}
+
 fn fetch_from_github_via_gh(source: &GitHubSource) -> Result<Option<String>> {
     let display_source = format!(
         "github:{}/{}@{}/{}",
@@ -321,26 +361,18 @@ fn fetch_from_github_via_gh(source: &GitHubSource) -> Result<Option<String>> {
             "-F",
             &format!("ref={}", source.r#ref),
         ])
+        .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::piped())
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
         .spawn()
     {
         Ok(child) => child,
         Err(_) => return Ok(None),
     };
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("gh output missing stdout"))?;
-    let content = match read_text_with_limit(stdout, &display_source) {
-        Ok(content) => content,
-        Err(err) => {
-            drop(child.kill());
-            drop(child.wait());
-            return Err(err);
-        }
-    };
+    let content = read_child_stdout_with_limit(&mut child, &display_source, HTTP_TIMEOUT)?;
     let status = child.wait()?;
     if status.success() && !content.is_empty() {
         Ok(Some(content))
@@ -450,9 +482,60 @@ fn resolve_token(config: &Config) -> Result<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
+
+    static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    fn temp_script(name: &str, body: &str) -> PathBuf {
+        let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "sso-jwt-cli-test-{}-{}-{}",
+            std::process::id(),
+            id,
+            name
+        ));
+        fs::write(&path, body).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn temp_script(name: &str, body: &str) -> PathBuf {
+        let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "sso-jwt-cli-test-{}-{}-{}",
+            std::process::id(),
+            id,
+            name
+        ));
+        let script_path = base.with_extension("ps1");
+        let wrapper_path = base.with_extension("cmd");
+        fs::write(&script_path, body).unwrap();
+        let wrapper = format!(
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\n",
+            script_path.display()
+        );
+        fs::write(&wrapper_path, wrapper).unwrap();
+        wrapper_path
+    }
+
+    fn cleanup_script(path: &Path) {
+        drop(fs::remove_file(path));
+        #[cfg(windows)]
+        {
+            drop(fs::remove_file(path.with_extension("ps1")));
+        }
+    }
 
     fn default_cli() -> Cli {
         Cli {
@@ -859,5 +942,39 @@ mod tests {
         let error = fetch_url_text(&client, &format!("http://{addr}/config.toml")).unwrap_err();
         assert!(error.to_string().contains("exceeds"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn read_child_stdout_with_limit_times_out_for_stalled_process() {
+        #[cfg(unix)]
+        let script = temp_script(
+            "stalled-gh.sh",
+            r#"#!/bin/sh
+sleep 1
+printf 'too late'
+"#,
+        );
+        #[cfg(windows)]
+        let script = temp_script(
+            "stalled-gh",
+            r#"Start-Sleep -Seconds 1
+[Console]::Out.Write('too late')
+"#,
+        );
+
+        let mut child = std::process::Command::new(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let error = read_child_stdout_with_limit(
+            &mut child,
+            "github:owner/repo@ref/file.toml",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        cleanup_script(&script);
     }
 }

@@ -90,6 +90,13 @@ impl Config {
         }
     }
 
+    fn legacy_component_is_unambiguous(value: &str) -> bool {
+        let value = if value.is_empty() { "default" } else { value };
+        value
+            .bytes()
+            .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+    }
+
     fn validate_endpoint_url(name: &str, value: &str) -> Result<()> {
         let parsed =
             reqwest::Url::parse(value).map_err(|error| anyhow!("invalid {name}: {error}"))?;
@@ -310,7 +317,21 @@ impl Config {
         Self::cache_dir().join(format!("{stem}.enc"))
     }
 
-    pub(crate) fn legacy_cache_file_path(&self) -> PathBuf {
+    pub(crate) fn can_use_legacy_cache_path(&self) -> bool {
+        Self::legacy_component_is_unambiguous(&self.server)
+            && Self::legacy_component_is_unambiguous(&self.cache_name)
+            && self
+                .environment
+                .as_deref()
+                .map(Self::legacy_component_is_unambiguous)
+                .unwrap_or(true)
+    }
+
+    pub(crate) fn legacy_cache_file_path(&self) -> Option<PathBuf> {
+        if !self.can_use_legacy_cache_path() {
+            return None;
+        }
+
         let cache_part = Self::legacy_cache_component(&self.cache_name);
         let server_part = Self::legacy_cache_component(&self.server);
         let stem = match &self.environment {
@@ -321,16 +342,14 @@ impl Config {
             None => format!("{server_part}-{cache_part}"),
         };
 
-        Self::cache_dir().join(format!("{stem}.enc"))
+        Some(Self::cache_dir().join(format!("{stem}.enc")))
     }
 
     pub(crate) fn cache_lookup_paths(&self) -> Vec<PathBuf> {
         let primary = self.cache_file_path();
-        let legacy = self.legacy_cache_file_path();
-        if legacy == primary {
-            vec![primary]
-        } else {
-            vec![primary, legacy]
+        match self.legacy_cache_file_path() {
+            Some(legacy) if legacy != primary => vec![primary, legacy],
+            _ => vec![primary],
         }
     }
 
@@ -862,8 +881,25 @@ another_unknown = 42
         cfg_b.cache_name = "prod".to_string();
 
         assert_ne!(cfg_a.cache_file_path(), cfg_b.cache_file_path());
-        assert_ne!(cfg_a.legacy_cache_file_path(), cfg_a.cache_file_path());
-        assert_eq!(cfg_a.cache_lookup_paths().len(), 2);
+        assert!(cfg_a.legacy_cache_file_path().is_none());
+        assert_eq!(cfg_a.cache_lookup_paths(), vec![cfg_a.cache_file_path()]);
+    }
+
+    #[test]
+    fn safe_legacy_cache_path_remains_available_for_migration() {
+        let mut cfg = test_config();
+        cfg.server = "alpha".to_string();
+        cfg.environment = Some("prod".to_string());
+        cfg.cache_name = "cache_1".to_string();
+
+        let legacy = cfg
+            .legacy_cache_file_path()
+            .expect("safe cache identifiers should keep legacy lookup");
+        assert_ne!(legacy, cfg.cache_file_path());
+        assert_eq!(
+            cfg.cache_lookup_paths(),
+            vec![cfg.cache_file_path(), legacy]
+        );
     }
 
     #[test]
