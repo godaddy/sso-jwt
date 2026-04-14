@@ -1,59 +1,57 @@
 # sso-jwt (CLI)
 
-Command-line tool for obtaining SSO JWTs with hardware-backed secure caching. This is the binary crate -- it's a thin CLI wrapper around [`sso-jwt-lib`](../sso-jwt-lib/).
+Thin CLI wrapper around [`sso-jwt-lib`](../sso-jwt-lib/) for obtaining JWTs and injecting them into child processes safely.
 
-## Installation
+## Current commands
+
+- `shell-init`
+- `exec`
+- `install`
+- `uninstall`
+- `add-server`
+
+Running `sso-jwt` with no subcommand resolves a token and prints it to stdout.
+
+## Common usage
 
 ```bash
-cargo install --path .
-```
-
-## Usage
-
-```bash
-# Get a JWT for a single command (recommended)
-COMPANY_JWT=$(sso-jwt) terraform apply
-
-# Exec mode -- JWT never touches stdout
+# preferred
 sso-jwt exec -- terraform apply
 
-# Shell integration for export detection
-eval "$(sso-jwt shell-init)"
+# stdout for a single child process
+SSO_JWT=$(sso-jwt) terraform apply
 
-# Clear cached token
+# clear cache and exit
 sso-jwt --clear
 
-# Dev environment, high security
-sso-jwt -e dev --risk-level 3 --biometric
+# use a specific server profile
+sso-jwt --server myco --environment dev
+
+# install shell guardrails
+eval "$(sso-jwt shell-init zsh)"
 ```
 
-Run `sso-jwt --help` for all options.
-
-## Shell Integration
-
-Add to your shell profile:
+`exec` uses `SSO_JWT` by default. Override it with:
 
 ```bash
-# zsh
-eval "$(sso-jwt shell-init zsh)"
-
-# bash
-eval "$(sso-jwt shell-init bash)"
-
-# fish
-sso-jwt shell-init fish | source
+sso-jwt exec --env-var COMPANY_JWT -- terraform apply
 ```
 
-This installs a wrapper function that detects `export COMPANY_JWT=$(sso-jwt)` and refuses to emit the token, guiding users toward the safer `COMPANY_JWT=$(sso-jwt) command` or `sso-jwt exec` patterns.
+## Install behavior
+
+- on Windows: configures bundled WSL integration
+- on other platforms: prints the shell-init line to add manually
 
 ## Architecture
 
-The CLI contains only:
-- **cli.rs** -- Clap argument parsing and dispatch
-- **exec.rs** -- Fork/exec with JWT injected into child environment
-- **shell_init.rs** -- Shell integration script generation (bash/zsh/fish)
+The CLI owns:
 
-All core logic (caching, OAuth, secure storage, JWT parsing) lives in [`sso-jwt-lib`](../sso-jwt-lib/).
+- argument parsing and dispatch
+- shell-init generation
+- child-process exec behavior
+- server-profile import via `add-server`
+
+Token resolution, cache handling, and OAuth behavior live in [`sso-jwt-lib`](../sso-jwt-lib/).
 
 ## License
 

@@ -2,163 +2,100 @@
 
 ## Overview
 
-sso-jwt obtains SSO JWTs via the OAuth Device Code flow (RFC 8628) and
-caches them encrypted using hardware-backed keys. Tokens never touch disk
-as plaintext and are never exported into long-lived shell environment
-variables.
+`sso-jwt` obtains JWTs through the OAuth Device Code flow and caches them encrypted with hardware-backed keys when available.
 
-## Architecture
+The current design has three important properties:
 
-4-crate workspace plus shared dependencies from
-[libenclaveapp](https://github.com/godaddy/libenclaveapp):
+1. token caching is encrypted at rest
+2. cache state is namespaced by server, environment, and cache name
+3. server configuration is profile-based rather than hardcoded to one endpoint
 
-| Crate | Type | Purpose |
-|---|---|---|
-| `sso-jwt` | Binary | CLI tool: token retrieval, exec mode, shell integration |
-| `sso-jwt-lib` | Library | Core logic: config, cache, OAuth, secure storage, JWT parsing |
-| `sso-jwt-napi` | cdylib | Node.js native addon via napi-rs (drop-in replacement) |
-| `sso-jwt-tpm-bridge` | Binary | Windows TPM bridge for WSL environments |
+## Workspace
 
-### libenclaveapp Dependency
-
-All platform-specific crypto is delegated to libenclaveapp's `encryption`
-feature. `sso-jwt-lib/secure_storage` wraps libenclaveapp's
-`EnclaveEncryptor` trait into sso-jwt's `SecureStorage` trait.
-
-## OAuth Device Code Flow
-
-sso-jwt implements RFC 8628 (OAuth 2.0 Device Authorization Grant):
-
-```
-User                sso-jwt              Authorization Server
-  |                   |                          |
-  |  sso-jwt          |                          |
-  |------------------>|                          |
-  |                   | POST device_authorization|
-  |                   |------------------------->|
-  |                   |   device_code, user_code |
-  |                   |<-------------------------|
-  |                   |                          |
-  |  "Open browser,   |                          |
-  |   enter: XXXX"    |                          |
-  |<------------------|                          |
-  |                   |                          |
-  |  (user authorizes in browser)                |
-  |                   |                          |
-  |                   | POST token (polling)     |
-  |                   |------------------------->|
-  |                   |   access_token (JWT)     |
-  |                   |<-------------------------|
-  |                   |                          |
-  |   JWT (stdout     | Encrypt + cache          |
-  |   or exec env)    |                          |
-  |<------------------|                          |
-```
-
-The `oauth_url` is the device authorization endpoint. The `token_url` is
-the token polling endpoint. When `token_url` is omitted, `oauth_url` is
-used for both (backward compatible with single-endpoint services).
-
-## Token Lifecycle
-
-Tokens go through four lifecycle states based on age relative to the
-risk-level window:
-
-```
-  0%                    ~80%                  100%        100% + 5min
-  |---- FRESH ----------|---- REFRESH --------|-- GRACE --|-- DEAD -->
-```
-
-| State | Behavior |
+| Crate | Purpose |
 |---|---|
-| Fresh | Return cached token immediately. No network calls. |
-| Refresh | Try heartbeat refresh. On failure, return cached token. |
-| Grace | Try heartbeat refresh. On failure, full re-auth. |
-| Dead | Full re-authentication via Device Code flow. |
+| `sso-jwt` | CLI commands, shell integration, install/uninstall helpers |
+| `sso-jwt-lib` | config loading, OAuth flow, cache lifecycle, JWT parsing |
+| `sso-jwt-napi` | Node.js binding |
+| `sso-jwt-tpm-bridge` | Windows bridge process for WSL |
 
-### Expiration Windows
+## Storage design
 
-| Risk Level | Max Age | Refresh Window | Session Timeout |
-|---|---|---|---|
-| 1 (low) | 24 hours | last 2 hours | 72 hours |
-| 2 (medium) | 12 hours | last 1 hour | 24 hours |
-| 3 (high) | 1 hour | last 10 minutes | 8 hours |
+`sso-jwt-lib` uses `enclaveapp-app-storage` from `libenclaveapp` for encryption storage. That shared layer is responsible for:
 
-The absolute session timeout (`session_start` timestamp) prevents
-indefinite refresh chains.
+- backend selection
+- key initialization
+- WSL bridge discovery
+- access-policy mapping
 
-## Cache Format
+`sso-jwt` passes:
 
-Binary cache format with unencrypted header for fast expiration checks
-without hardware calls:
+- `app_name = "sso-jwt"`
+- `key_label = "cache-key"`
+- `AccessPolicy::BiometricOnly` when `--biometric` is enabled
 
-```
-Offset  Length  Field
-0       4       Magic: "SJWT"
-4       1       Format version: 0x01
-5       1       Risk level
-6       8       Token issued-at (Unix epoch, big-endian)
-14      8       Session start (Unix epoch, big-endian)
-22      4       Ciphertext length (big-endian)
-26      var     ECIES ciphertext (enclaveapp format)
-```
+## Configuration model
 
-Cache files are stored at `~/.config/sso-jwt/<cache_name>.enc`.
+The active configuration is built from:
 
-## Secure Storage
+1. config file
+2. `SSOJWT_*` environment variables
+3. CLI overrides
 
-Each platform backend wraps libenclaveapp's `EnclaveEncryptor`:
+The config file stores:
 
-| Platform | Backend | Notes |
-|---|---|---|
-| macOS | Secure Enclave | ECIES via enclaveapp-apple |
-| Windows | TPM 2.0 | ECIES via enclaveapp-windows |
-| WSL | TPM bridge | JSON-RPC to Windows host via enclaveapp-bridge |
-| Linux | Software fallback | File-based encryption, one-time warning |
+- `default_server`
+- `risk_level`
+- `biometric`
+- `cache_name`
+- `servers.<name>.client_id`
+- `servers.<name>.environments.<env>.oauth_url`
+- optional `token_url`
+- optional `heartbeat_url`
 
-## Multi-Server Configuration
+Direct `--oauth-url` use bypasses server-profile resolution.
 
-sso-jwt supports multiple SSO servers via the config file:
+## Cache model
 
-```toml
-default_server = "internal"
+Cache files live under `~/.config/sso-jwt/` and are named from:
 
-[servers.internal]
-client_id = "sso-jwt"
+- server
+- environment, when present
+- cache name
 
-[servers.internal.environments.prod]
-default = true
-oauth_url = "https://sso.example.com/oauth/device"
-token_url = "https://sso.example.com/oauth/token"
+That keeps multiple concurrent environments and servers isolated from each other.
 
-[servers.github]
-client_id = "github-oauth-app-id"
+The cache lifecycle is:
 
-[servers.github.environments.prod]
-default = true
-oauth_url = "https://github.com/login/device/code"
-token_url = "https://github.com/login/oauth/access_token"
-```
+- `Fresh`
+- `Refresh`
+- `Grace`
+- `Dead`
 
-Each server can have multiple environments (dev, test, prod) with
-independent OAuth endpoints. The `--server` and `--environment` CLI flags
-select which to use.
+Risk level controls the refresh window and absolute session timeout.
 
-## Configuration Precedence
+## CLI design
 
-CLI flags > environment variables (`SSOJWT_*`) > config file > defaults.
+The main CLI supports:
 
-## Security Design
+- direct token output
+- `exec` mode with child-only environment injection
+- shell guardrails through `shell-init`
+- `install` and `uninstall`
+- `add-server` for onboarding new server profiles
 
-- Tokens encrypted at rest with hardware-bound ECIES keys
-- `exec` mode injects JWT into child process environment only
-- Shell integration detects accidental `export` usage
-- `Zeroizing<Vec<u8>>` for all in-memory token buffers
-- Absolute session timeouts prevent indefinite refresh chains
-- File permissions: 0700 dirs, 0600 files
+The default `exec` variable name is `SSO_JWT`.
 
-## WSL Bridge
+## Platform model
 
-Same architecture as awsenc: JSON-RPC over stdin/stdout to
-`sso-jwt-tpm-bridge.exe` on the Windows host. Bridge binary is installed
-alongside the main Windows installer.
+| Platform | Backend |
+|---|---|
+| macOS | Secure Enclave |
+| Windows | TPM 2.0 |
+| WSL | Windows TPM bridge |
+| Linux with TPM | TPM 2.0 |
+| Linux without TPM | software fallback |
+
+## Security boundaries
+
+The main security goal is to avoid plaintext token files. `sso-jwt` does not try to eliminate all token exposure after decryption; that is why `exec` mode exists and is preferred for command execution.

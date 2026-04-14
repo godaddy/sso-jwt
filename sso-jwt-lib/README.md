@@ -1,64 +1,73 @@
 # sso-jwt-lib
 
-Core library for the sso-jwt toolkit. Provides JWT caching with hardware-backed encryption, OAuth Device Code flow, and proactive token refresh.
+Core library for `sso-jwt`.
 
-This crate is used by both the [`sso-jwt`](../sso-jwt/) CLI and the [`sso-jwt-napi`](../sso-jwt-napi/) Node.js binding.
+It owns:
 
-## Usage as a Rust dependency
+- configuration loading and server-profile resolution
+- cache format and token lifecycle
+- OAuth Device Code flow and heartbeat refresh
+- JWT parsing
 
-```toml
-[dependencies]
-sso-jwt-lib = { path = "../sso-jwt-lib" }
-```
+Encryption storage is provided by `enclaveapp-app-storage` from `libenclaveapp`.
 
-### High-level API
+## High-level API
 
 ```rust
 use sso_jwt_lib::{get_jwt, GetJwtOptions};
 
-let options = GetJwtOptions {
+let jwt = get_jwt(&GetJwtOptions {
+    server: Some("myco".to_string()),
     env: Some("prod".to_string()),
-    cache_name: Some("my-app".to_string()),
+    cache_name: Some("terraform".to_string()),
     ..Default::default()
-};
-
-let jwt = get_jwt(&options)?;
+})?;
 ```
 
-`get_jwt()` handles the full flow: load config, initialize platform secure storage, check the cache, refresh if needed, and fall back to OAuth Device Code authentication.
+## Lower-level usage
 
-### Module-level API
-
-For finer control, use the individual modules directly:
+If you need more control, build config and storage explicitly:
 
 ```rust
-use sso_jwt_lib::{config::Config, cache, secure_storage};
+use enclaveapp_app_storage::{create_encryption_storage, AccessPolicy, StorageConfig};
+use sso_jwt_lib::{cache, config::Config};
 
-let config = Config::load()?;
-let storage = secure_storage::platform_storage(config.biometric)?;
+let mut config = Config::load()?;
+config.resolve_server()?;
+
+let storage = create_encryption_storage(StorageConfig {
+    app_name: "sso-jwt".into(),
+    key_label: "cache-key".into(),
+    access_policy: AccessPolicy::None,
+    extra_bridge_paths: vec![],
+    keys_dir: None,
+})?;
+
 let jwt = cache::resolve_token(&config, storage.as_ref())?;
 ```
 
-## Modules
+## Public modules
 
-| Module | Description |
+| Module | Purpose |
 |---|---|
-| `config` | Configuration loading (TOML file + `SSOJWT_*` env vars) |
-| `cache` | Binary cache format, token lifecycle (Fresh/Refresh/Grace/Dead), proactive heartbeat refresh |
-| `jwt` | JWT parsing: base64url decode, claim extraction (`iat`, `exp`, `sub`) |
-| `oauth` | OAuth 2.0 Device Code flow, browser opening with `$BROWSER` fallback, heartbeat refresh |
-| `secure_storage` | `SecureStorage` trait with platform backends: Secure Enclave (macOS), TPM 2.0 (Windows), WSL bridge, software keyring (Linux) |
+| `config` | config file loading, env overrides, server/environment resolution |
+| `cache` | cache format, lifecycle, clear/resolve helpers |
+| `jwt` | JWT parsing utilities |
+| `oauth` | Device Code flow and token refresh helpers |
 
-## Platform Backends
+## Config model
 
-The `secure_storage::platform_storage()` function auto-selects the backend:
+`Config` merges:
 
-| Platform | Backend | Hardware-bound |
-|---|---|---|
-| macOS | Secure Enclave (ECIES P-256) | Yes |
-| Windows | TPM 2.0 (CNG) | Yes |
-| WSL | TPM bridge to Windows host | Yes |
-| Linux | D-Bus Secret Service (GNOME Keyring / KDE Wallet) | No |
+1. `~/.config/sso-jwt/config.toml`
+2. `SSOJWT_*` environment variables
+3. caller-provided overrides in `GetJwtOptions`
+
+Server profiles are resolved from:
+
+- `default_server`
+- `servers.<name>.client_id`
+- `servers.<name>.environments.<env>`
 
 ## License
 
