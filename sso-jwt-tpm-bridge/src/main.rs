@@ -64,7 +64,7 @@ fn handle_request(
                 Err(e) => BridgeResponse::error(&format!("decrypt failed: {e}")),
             }
         }
-        "destroy" => {
+        "destroy" | "delete" => {
             *storage = None;
             BridgeResponse::success("ok")
         }
@@ -158,6 +158,13 @@ mod tests {
         let req: BridgeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "decrypt");
         assert_eq!(req.params.data, "Y2lwaGVy");
+    }
+
+    #[test]
+    fn parse_delete_request() {
+        let json = r#"{"method": "delete", "params": {}}"#;
+        let req: BridgeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "delete");
     }
 
     #[test]

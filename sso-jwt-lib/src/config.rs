@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use enclaveapp_core::metadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -54,7 +55,7 @@ impl Config {
     /// After loading, call `resolve_server()` to finalize oauth_url/heartbeat_url
     /// from server profiles.
     pub fn load() -> Result<Self> {
-        let fc = Self::load_file_config().unwrap_or_default();
+        let fc = Self::load_file_config_if_exists()?.unwrap_or_default();
 
         let mut cfg = Config {
             server: fc
@@ -123,7 +124,11 @@ impl Config {
             return Ok(());
         }
 
-        let fc = Self::load_file_config().unwrap_or_default();
+        let fc = Self::load_file_config_if_exists()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no server configured. Either set --oauth-url or configure a server in ~/.config/sso-jwt/config.toml"
+            )
+        })?;
         let servers = match fc.servers {
             Some(s) => s,
             None => {
@@ -143,8 +148,10 @@ impl Config {
         };
 
         // Apply server-level settings
-        if let Some(ref cid) = server_config.client_id {
-            self.client_id = cid.clone();
+        if self.client_id == DEFAULT_CLIENT_ID {
+            if let Some(ref cid) = server_config.client_id {
+                self.client_id = cid.clone();
+            }
         }
 
         // Resolve the environment
@@ -199,7 +206,9 @@ impl Config {
         if self.token_url.is_none() {
             self.token_url = env_config.token_url.clone();
         }
-        self.heartbeat_url = env_config.heartbeat_url.clone();
+        if self.heartbeat_url.is_none() {
+            self.heartbeat_url = env_config.heartbeat_url.clone();
+        }
 
         Ok(())
     }
@@ -257,16 +266,18 @@ impl Config {
         Self::cache_dir().join(format!("{name}.enc"))
     }
 
-    fn load_file_config() -> Result<FileConfig> {
+    fn load_file_config_if_exists() -> Result<Option<FileConfig>> {
         let path = Self::config_file_path();
-        let content = std::fs::read_to_string(path)?;
-        let config: FileConfig = toml::from_str(&content)?;
-        Ok(config)
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(Some(toml::from_str(&content)?)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Load the on-disk file config, returning defaults if the file is missing.
-    pub fn load_file_config_public() -> FileConfig {
-        Self::load_file_config().unwrap_or_default()
+    pub fn load_file_config_public() -> Result<FileConfig> {
+        Ok(Self::load_file_config_if_exists()?.unwrap_or_default())
     }
 
     /// Write a `FileConfig` back to the config file as TOML.
@@ -275,7 +286,9 @@ impl Config {
         let dir = Self::config_dir();
         std::fs::create_dir_all(&dir)?;
         let content = toml::to_string_pretty(fc)?;
-        std::fs::write(path, content)?;
+        metadata::atomic_write(&path, content.as_bytes())?;
+        #[cfg(unix)]
+        metadata::restrict_file_permissions(&path)?;
         Ok(())
     }
 
@@ -292,7 +305,7 @@ impl Config {
     ) -> Result<()> {
         let server_config: ServerFileConfig = toml::from_str(toml_content)?;
 
-        let mut fc = Self::load_file_config_public();
+        let mut fc = Self::load_file_config_public()?;
         let servers = fc.servers.get_or_insert_with(HashMap::new);
 
         if servers.contains_key(label) && !force {
@@ -352,6 +365,42 @@ mod tests {
         }
     }
 
+    struct TestEnvGuard {
+        saved: Vec<Option<String>>,
+        prev_xdg: Option<String>,
+        prev_home: Option<String>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            restore_env(std::mem::take(&mut self.saved));
+            match &self.prev_xdg {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match &self.prev_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn isolated_env_guard() -> TestEnvGuard {
+        let saved = save_and_clear_env();
+        let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("HOME", dir.path());
+        TestEnvGuard {
+            saved,
+            prev_xdg,
+            prev_home,
+            _dir: dir,
+        }
+    }
+
     /// Helper to build a Config directly for tests (bypasses file/env loading).
     fn test_config() -> Config {
         Config {
@@ -372,7 +421,7 @@ mod tests {
     #[test]
     fn default_values() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         let cfg = Config::load().expect("Config::load should succeed");
         assert_eq!(cfg.server, "default");
@@ -384,8 +433,6 @@ mod tests {
         assert_eq!(cfg.risk_level, 2);
         assert!(!cfg.biometric);
         assert_eq!(cfg.cache_name, "default");
-
-        restore_env(saved);
     }
 
     #[test]
@@ -500,55 +547,47 @@ oauth_url = "https://other.example.com/oauth"
     #[test]
     fn env_var_overrides_server() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_SERVER", "custom-server");
         let cfg = Config::load().expect("Config::load should succeed");
         assert_eq!(cfg.server, "custom-server");
-
-        restore_env(saved);
     }
 
     #[test]
     fn env_var_overrides_environment() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_ENVIRONMENT", "staging");
         let cfg = Config::load().expect("Config::load should succeed");
         assert_eq!(cfg.environment.as_deref(), Some("staging"));
-
-        restore_env(saved);
     }
 
     #[test]
     fn env_var_overrides_oauth_url() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_OAUTH_URL", "https://custom.example.com/oauth");
         let cfg = Config::load().expect("Config::load should succeed");
         assert_eq!(cfg.oauth_url, "https://custom.example.com/oauth");
-
-        restore_env(saved);
     }
 
     #[test]
     fn env_var_overrides_client_id() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_CLIENT_ID", "my-custom-client");
         let cfg = Config::load().expect("Config::load should succeed");
         assert_eq!(cfg.client_id, "my-custom-client");
-
-        restore_env(saved);
     }
 
     #[test]
     fn env_var_biometric_values() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         // "true" enables biometric
         std::env::set_var("SSOJWT_BIOMETRIC", "true");
@@ -570,8 +609,6 @@ oauth_url = "https://other.example.com/oauth"
             !cfg.biometric,
             "SSOJWT_BIOMETRIC=false should disable biometric"
         );
-
-        restore_env(saved);
     }
 
     #[test]
@@ -823,7 +860,7 @@ oauth_url = "https://sso.example.com/device"
     #[test]
     fn env_var_overrides_token_url() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_TOKEN_URL", "https://custom.example.com/token");
         let cfg = Config::load().expect("Config::load should succeed");
@@ -831,21 +868,70 @@ oauth_url = "https://sso.example.com/device"
             cfg.token_url.as_deref(),
             Some("https://custom.example.com/token")
         );
-
-        restore_env(saved);
     }
 
     #[test]
     fn token_url_absent_by_default() {
         let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let saved = save_and_clear_env();
+        let _guard = isolated_env_guard();
 
         let cfg = Config::load().expect("Config::load should succeed");
         assert!(
             cfg.token_url.is_none(),
             "token_url should be None by default"
         );
+    }
 
-        restore_env(saved);
+    #[test]
+    fn malformed_config_file_returns_error() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
+        let path = Config::config_file_path();
+        std::fs::create_dir_all(path.parent().expect("config parent")).expect("create parent");
+        std::fs::write(&path, "not = [valid").expect("write invalid config");
+
+        let err = Config::load().expect_err("invalid config should fail");
+        assert!(err.to_string().contains("TOML"));
+    }
+
+    #[test]
+    fn resolve_server_preserves_env_client_id_and_heartbeat() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
+
+        let fc = FileConfig {
+            default_server: Some("myco".into()),
+            risk_level: None,
+            biometric: None,
+            cache_name: None,
+            servers: Some(HashMap::from([(
+                "myco".into(),
+                ServerFileConfig {
+                    client_id: Some("file-client".into()),
+                    environments: Some(HashMap::from([(
+                        "prod".into(),
+                        EnvironmentFileConfig {
+                            default: Some(true),
+                            oauth_url: Some("https://auth.example.com/device".into()),
+                            token_url: None,
+                            heartbeat_url: Some("https://file.example.com/heartbeat".into()),
+                        },
+                    )])),
+                },
+            )])),
+        };
+        Config::save_file_config(&fc).expect("save config");
+
+        std::env::set_var("SSOJWT_CLIENT_ID", "env-client");
+        std::env::set_var("SSOJWT_HEARTBEAT_URL", "https://env.example.com/heartbeat");
+
+        let mut cfg = Config::load().expect("load config");
+        cfg.resolve_server().expect("resolve server");
+
+        assert_eq!(cfg.client_id, "env-client");
+        assert_eq!(
+            cfg.heartbeat_url.as_deref(),
+            Some("https://env.example.com/heartbeat")
+        );
     }
 }
