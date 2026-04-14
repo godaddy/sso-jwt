@@ -2,12 +2,15 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use enclaveapp_app_storage::{create_encryption_storage, AccessPolicy, StorageConfig};
 use sso_jwt_lib::{cache, config::Config};
+use std::io::Read;
+use std::process::Stdio;
 use std::time::Duration;
 
 use crate::exec;
 use crate::shell_init;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_SERVER_CONFIG_BYTES: u64 = 64 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -264,27 +267,8 @@ fn fetch_from_github(github_path: &str, client: &reqwest::blocking::Client) -> R
     }
 
     // Strategy 2: gh CLI -- handles SAML SSO, internal repos
-    if let Ok(output) = std::process::Command::new("gh")
-        .args([
-            "api",
-            &format!(
-                "repos/{}/{}/contents/{}",
-                source.owner, source.repo, source.path
-            ),
-            "-H",
-            "Accept: application/vnd.github.raw+json",
-            "-F",
-            &format!("ref={}", source.r#ref),
-        ])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        if output.status.success() {
-            let content = String::from_utf8_lossy(&output.stdout).to_string();
-            if !content.is_empty() {
-                return Ok(content);
-            }
-        }
+    if let Some(content) = fetch_from_github_via_gh(&source)? {
+        return Ok(content);
     }
 
     bail!(
@@ -305,6 +289,66 @@ fn blocking_http_client_with_timeout(timeout: Duration) -> Result<reqwest::block
         .build()?)
 }
 
+fn read_text_with_limit<R: Read>(mut reader: R, source: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_SERVER_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SERVER_CONFIG_BYTES {
+        bail!(
+            "server config from {source} exceeds {} bytes",
+            MAX_SERVER_CONFIG_BYTES
+        );
+    }
+    String::from_utf8(bytes).map_err(Into::into)
+}
+
+fn fetch_from_github_via_gh(source: &GitHubSource) -> Result<Option<String>> {
+    let display_source = format!(
+        "github:{}/{}@{}/{}",
+        source.owner, source.repo, source.r#ref, source.path
+    );
+    let mut child = match std::process::Command::new("gh")
+        .args([
+            "api",
+            &format!(
+                "repos/{}/{}/contents/{}",
+                source.owner, source.repo, source.path
+            ),
+            "-H",
+            "Accept: application/vnd.github.raw+json",
+            "-F",
+            &format!("ref={}", source.r#ref),
+        ])
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("gh output missing stdout"))?;
+    let content = match read_text_with_limit(stdout, &display_source) {
+        Ok(content) => content,
+        Err(err) => {
+            drop(child.kill());
+            drop(child.wait());
+            return Err(err);
+        }
+    };
+    let status = child.wait()?;
+    if status.success() && !content.is_empty() {
+        Ok(Some(content))
+    } else {
+        Ok(None)
+    }
+}
+
 fn fetch_url_text(client: &reqwest::blocking::Client, source: &str) -> Result<String> {
     let resp = client.get(source).send()?;
     if !resp.status().is_success() {
@@ -313,7 +357,15 @@ fn fetch_url_text(client: &reqwest::blocking::Client, source: &str) -> Result<St
             resp.status()
         );
     }
-    Ok(resp.text()?)
+    if let Some(length) = resp.content_length() {
+        if length > MAX_SERVER_CONFIG_BYTES {
+            bail!(
+                "server config from {source} exceeds {} bytes",
+                MAX_SERVER_CONFIG_BYTES
+            );
+        }
+    }
+    read_text_with_limit(resp, source)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,5 +834,30 @@ mod tests {
             message.contains("timed out") || message.contains("timeout"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn fetch_url_text_rejects_oversized_response() {
+        let oversized = "x".repeat((MAX_SERVER_CONFIG_BYTES as usize) + 1);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 1024];
+                drop(stream.read(&mut request));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    oversized.len(),
+                    oversized
+                );
+                drop(stream.write_all(response.as_bytes()));
+            }
+        });
+
+        let client = blocking_http_client().unwrap();
+        let error = fetch_url_text(&client, &format!("http://{addr}/config.toml")).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        server.join().unwrap();
     }
 }

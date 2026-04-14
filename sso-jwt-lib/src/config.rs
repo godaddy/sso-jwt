@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const DEFAULT_RISK_LEVEL: u8 = 2;
 const DEFAULT_CACHE_NAME: &str = "default";
 const DEFAULT_CLIENT_ID: &str = "sso-jwt";
@@ -50,6 +53,43 @@ pub struct EnvironmentFileConfig {
 }
 
 impl Config {
+    fn encode_cache_component(value: &str) -> String {
+        let value = if value.is_empty() { "default" } else { value };
+        let mut encoded = String::with_capacity(value.len());
+
+        for byte in value.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {
+                    encoded.push(byte as char);
+                }
+                _ => {
+                    encoded.push('~');
+                    encoded.push(
+                        char::from_digit(u32::from(byte >> 4), 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
+                    encoded.push(
+                        char::from_digit(u32::from(byte & 0x0f), 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
+                }
+            }
+        }
+
+        encoded
+    }
+
+    fn legacy_cache_component(value: &str) -> String {
+        let sanitized = value.replace(['/', '\\'], "").replace("..", "");
+        if sanitized.is_empty() {
+            "default".to_string()
+        } else {
+            sanitized
+        }
+    }
+
     fn validate_endpoint_url(name: &str, value: &str) -> Result<()> {
         let parsed =
             reqwest::Url::parse(value).map_err(|error| anyhow!("invalid {name}: {error}"))?;
@@ -257,37 +297,41 @@ impl Config {
     }
 
     pub fn cache_file_path(&self) -> PathBuf {
-        // Sanitize cache name: strip path separators and traversal sequences
-        // to prevent writing outside the cache directory.
-        let sanitized_cache: String = self.cache_name.replace(['/', '\\'], "").replace("..", "");
-        let cache_part = if sanitized_cache.is_empty() {
-            "default"
-        } else {
-            &sanitized_cache
+        let server = Self::encode_cache_component(&self.server);
+        let cache = Self::encode_cache_component(&self.cache_name);
+        let stem = match &self.environment {
+            Some(environment) => format!(
+                "server={server}--env={}--cache={cache}",
+                Self::encode_cache_component(environment)
+            ),
+            None => format!("server={server}--cache={cache}"),
         };
 
-        // Sanitize server name the same way
-        let sanitized_server: String = self.server.replace(['/', '\\'], "").replace("..", "");
-        let server_part = if sanitized_server.is_empty() {
-            "default"
-        } else {
-            &sanitized_server
-        };
+        Self::cache_dir().join(format!("{stem}.enc"))
+    }
 
-        let name = match &self.environment {
-            Some(env) => {
-                let sanitized_env: String = env.replace(['/', '\\'], "").replace("..", "");
-                let env_part = if sanitized_env.is_empty() {
-                    "default"
-                } else {
-                    &sanitized_env
-                };
-                format!("{server_part}-{env_part}-{cache_part}")
+    pub(crate) fn legacy_cache_file_path(&self) -> PathBuf {
+        let cache_part = Self::legacy_cache_component(&self.cache_name);
+        let server_part = Self::legacy_cache_component(&self.server);
+        let stem = match &self.environment {
+            Some(environment) => {
+                let environment = Self::legacy_cache_component(environment);
+                format!("{server_part}-{environment}-{cache_part}")
             }
             None => format!("{server_part}-{cache_part}"),
         };
 
-        Self::cache_dir().join(format!("{name}.enc"))
+        Self::cache_dir().join(format!("{stem}.enc"))
+    }
+
+    pub(crate) fn cache_lookup_paths(&self) -> Vec<PathBuf> {
+        let primary = self.cache_file_path();
+        let legacy = self.legacy_cache_file_path();
+        if legacy == primary {
+            vec![primary]
+        } else {
+            vec![primary, legacy]
+        }
     }
 
     fn load_file_config_if_exists() -> Result<Option<FileConfig>> {
@@ -353,10 +397,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Mutex to serialize tests that read/write SSOJWT_* env vars via Config::load().
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     const SSOJWT_KEYS: [&str; 9] = [
         "SSOJWT_SERVER",
@@ -444,7 +484,7 @@ mod tests {
 
     #[test]
     fn default_values() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         let cfg = Config::load().expect("Config::load should succeed");
@@ -581,7 +621,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_overrides_server() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_SERVER", "custom-server");
@@ -591,7 +631,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_overrides_environment() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_ENVIRONMENT", "staging");
@@ -601,7 +641,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_overrides_oauth_url() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_OAUTH_URL", "https://custom.example.com/oauth");
@@ -611,7 +651,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_cleartext_token_url_is_rejected() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_OAUTH_URL", "https://custom.example.com/oauth");
@@ -626,7 +666,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_overrides_client_id() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_CLIENT_ID", "my-custom-client");
@@ -636,7 +676,7 @@ oauth_url = "https://other.example.com/oauth"
 
     #[test]
     fn env_var_biometric_values() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         // "true" enables biometric
@@ -703,7 +743,7 @@ another_unknown = 42
             .file_name()
             .expect("should have filename")
             .to_string_lossy();
-        assert_eq!(filename, "myserver-default.enc");
+        assert_eq!(filename, "server=myserver--cache=default.enc");
     }
 
     #[test]
@@ -717,7 +757,7 @@ another_unknown = 42
             .file_name()
             .expect("should have filename")
             .to_string_lossy();
-        assert_eq!(filename, "myserver-dev-default.enc");
+        assert_eq!(filename, "server=myserver--env=dev--cache=default.enc");
     }
 
     #[test]
@@ -730,11 +770,11 @@ another_unknown = 42
             .file_name()
             .expect("should have filename")
             .to_string_lossy();
-        assert_eq!(filename, "co-myenv.enc");
+        assert_eq!(filename, "server=co--cache=myenv.enc");
     }
 
     #[test]
-    fn cache_name_path_traversal_stripped() {
+    fn cache_name_path_traversal_is_encoded_without_aliasing() {
         let mut cfg = test_config();
         cfg.cache_name = "../../etc/passwd".to_string();
         let path = cfg.cache_file_path();
@@ -743,33 +783,25 @@ another_unknown = 42
             .expect("should have filename")
             .to_string_lossy();
         assert!(
-            !filename.contains(".."),
-            "path traversal should be stripped: {filename}"
+            !filename.contains('/'),
+            "encoded filename should not contain path separators: {filename}"
         );
         assert!(
-            !filename.contains('/'),
-            "slashes should be stripped: {filename}"
+            filename.contains("~2E~2E~2F"),
+            "path traversal bytes should be encoded, not collapsed: {filename}"
         );
         assert!(
             filename.ends_with(".enc"),
             "should still end in .enc: {filename}"
         );
 
-        // Pure traversal with nothing left should fall back to "default"
-        cfg.cache_name = "../..".to_string();
-        let path = cfg.cache_file_path();
-        let filename = path
-            .file_name()
-            .expect("should have filename")
-            .to_string_lossy();
-        assert!(
-            filename.ends_with("default.enc"),
-            "pure traversal should fall back to default: {filename}"
-        );
+        let mut alias_cfg = test_config();
+        alias_cfg.cache_name = "etcpasswd".to_string();
+        assert_ne!(cfg.cache_file_path(), alias_cfg.cache_file_path());
     }
 
     #[test]
-    fn cache_name_backslash_stripped() {
+    fn cache_name_backslash_is_encoded() {
         let mut cfg = test_config();
         cfg.cache_name = r"..\..\windows\system32".to_string();
         let path = cfg.cache_file_path();
@@ -779,11 +811,11 @@ another_unknown = 42
             .to_string_lossy();
         assert!(
             !filename.contains('\\'),
-            "backslashes should be stripped: {filename}"
+            "backslashes should not appear literally: {filename}"
         );
         assert!(
-            !filename.contains(".."),
-            "traversal should be stripped: {filename}"
+            filename.contains("~5C"),
+            "backslashes should be encoded: {filename}"
         );
     }
 
@@ -797,11 +829,11 @@ another_unknown = 42
             .file_name()
             .expect("should have filename")
             .to_string_lossy();
-        assert_eq!(filename, "co-my-project.enc");
+        assert_eq!(filename, "server=co--cache=my-project.enc");
     }
 
     #[test]
-    fn server_path_traversal_stripped() {
+    fn server_path_traversal_is_encoded_without_colliding() {
         let mut cfg = test_config();
         cfg.server = "../../etc/evil".to_string();
         let path = cfg.cache_file_path();
@@ -810,13 +842,28 @@ another_unknown = 42
             .expect("should have filename")
             .to_string_lossy();
         assert!(
-            !filename.contains(".."),
-            "server traversal should be stripped: {filename}"
+            !filename.contains('/'),
+            "server traversal bytes should not create separators: {filename}"
         );
         assert!(
-            !filename.contains('/'),
-            "server slashes should be stripped: {filename}"
+            filename.contains("~2E~2E~2F"),
+            "server traversal bytes should be encoded: {filename}"
         );
+    }
+
+    #[test]
+    fn cache_path_distinguishes_escaped_components() {
+        let mut cfg_a = test_config();
+        cfg_a.server = "a/b".to_string();
+        cfg_a.cache_name = "prod".to_string();
+
+        let mut cfg_b = test_config();
+        cfg_b.server = "ab".to_string();
+        cfg_b.cache_name = "prod".to_string();
+
+        assert_ne!(cfg_a.cache_file_path(), cfg_b.cache_file_path());
+        assert_ne!(cfg_a.legacy_cache_file_path(), cfg_a.cache_file_path());
+        assert_eq!(cfg_a.cache_lookup_paths().len(), 2);
     }
 
     #[test]
@@ -909,7 +956,7 @@ oauth_url = "https://sso.example.com/device"
 
     #[test]
     fn env_var_overrides_token_url() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         std::env::set_var("SSOJWT_TOKEN_URL", "https://custom.example.com/token");
@@ -922,7 +969,7 @@ oauth_url = "https://sso.example.com/device"
 
     #[test]
     fn token_url_absent_by_default() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         let cfg = Config::load().expect("Config::load should succeed");
@@ -934,7 +981,7 @@ oauth_url = "https://sso.example.com/device"
 
     #[test]
     fn malformed_config_file_returns_error() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
         let path = Config::config_file_path();
         std::fs::create_dir_all(path.parent().expect("config parent")).expect("create parent");
@@ -946,7 +993,7 @@ oauth_url = "https://sso.example.com/device"
 
     #[test]
     fn resolve_server_preserves_env_client_id_and_heartbeat() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         let fc = FileConfig {
@@ -987,7 +1034,7 @@ oauth_url = "https://sso.example.com/device"
 
     #[test]
     fn resolve_server_rejects_cleartext_environment_heartbeat_url() {
-        let _lock = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
         let _guard = isolated_env_guard();
 
         let fc = FileConfig {

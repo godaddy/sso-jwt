@@ -234,9 +234,10 @@ pub fn write_cache(
 
 /// Delete the cache file.
 pub fn clear(config: &Config) -> Result<()> {
-    let path = config.cache_file_path();
-    if path.exists() {
-        fs::remove_file(&path).context("failed to remove cache file")?;
+    for path in config.cache_lookup_paths() {
+        if path.exists() {
+            fs::remove_file(&path).context("failed to remove cache file")?;
+        }
     }
     Ok(())
 }
@@ -247,7 +248,11 @@ pub fn clear(config: &Config) -> Result<()> {
 /// 3. Return cached / refresh / re-auth as appropriate
 #[allow(clippy::print_stderr)]
 pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result<String> {
-    let cache_path = config.cache_file_path();
+    let cache_path = config
+        .cache_lookup_paths()
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| config.cache_file_path());
 
     // Step 1: Read cache header
     let header = read_header(&cache_path)?;
@@ -364,6 +369,36 @@ mod tests {
     use super::*;
     use base64::Engine;
     use enclaveapp_app_storage::mock::MockEncryptionStorage as MockStorage;
+    use std::ffi::OsString;
+
+    struct TestConfigDirGuard {
+        prev_xdg: Option<OsString>,
+        prev_home: Option<OsString>,
+    }
+
+    impl Drop for TestConfigDirGuard {
+        fn drop(&mut self) {
+            match self.prev_xdg.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match self.prev_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn isolate_config_dir(dir: &tempfile::TempDir) -> TestConfigDirGuard {
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("HOME", dir.path());
+        TestConfigDirGuard {
+            prev_xdg,
+            prev_home,
+        }
+    }
 
     fn make_jwt(iat: u64) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1158,5 +1193,79 @@ mod tests {
             .expect("write cache");
 
         assert!(read_header(&path).expect("read header").is_some());
+    }
+
+    #[test]
+    fn clear_removes_legacy_cache_path() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let config = Config {
+            server: "a/b".to_string(),
+            environment: None,
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        let legacy_path = config.legacy_cache_file_path();
+        fs::create_dir_all(legacy_path.parent().expect("legacy parent")).expect("mkdir");
+        fs::write(&legacy_path, b"legacy-cache").expect("write legacy cache");
+        assert!(legacy_path.exists());
+
+        clear(&config).expect("clear cache");
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn resolve_token_reads_legacy_cache_path() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "a/b".to_string(),
+            environment: None,
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+        let legacy_path = config.legacy_cache_file_path();
+
+        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
+            .expect("write legacy cache");
+        assert!(legacy_path.exists());
+        assert!(read_header(&legacy_path)
+            .expect("read legacy header")
+            .is_some());
+        assert!(
+            config
+                .cache_lookup_paths()
+                .iter()
+                .any(|path| path == &legacy_path),
+            "lookup paths should include legacy cache path"
+        );
+
+        let resolved = resolve_token(&config, &storage).expect("resolve token");
+        assert_eq!(resolved, token);
+        assert!(!config.cache_file_path().exists());
     }
 }
