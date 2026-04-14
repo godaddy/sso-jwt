@@ -14,15 +14,6 @@ use enclaveapp_core::types::{AccessPolicy, KeyType};
 use std::path::Path;
 
 #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
-fn requested_policy(biometric: bool) -> AccessPolicy {
-    if biometric {
-        AccessPolicy::BiometricOnly
-    } else {
-        AccessPolicy::None
-    }
-}
-
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
 fn existing_policy(keys_dir: &Path, key_label: &str) -> Option<AccessPolicy> {
     let meta_path = keys_dir.join(format!("{key_label}.meta"));
     if !meta_path.exists() {
@@ -38,13 +29,11 @@ fn ensure_key<E>(
     encryptor: &E,
     keys_dir: &Path,
     key_label: &str,
-    biometric: bool,
+    policy: AccessPolicy,
 ) -> Result<(), String>
 where
     E: EnclaveEncryptor + EnclaveKeyManager,
 {
-    let policy = requested_policy(biometric);
-
     if encryptor.public_key(key_label).is_ok() {
         match existing_policy(keys_dir, key_label) {
             Some(existing) if existing != policy => {
@@ -66,6 +55,7 @@ where
 mod platform {
     use super::{ensure_key, metadata};
     use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
+    use enclaveapp_core::types::AccessPolicy;
     use enclaveapp_windows::TpmEncryptor;
 
     pub struct TpmStorage {
@@ -74,7 +64,11 @@ mod platform {
     }
 
     impl TpmStorage {
-        pub fn new(app_name: &str, key_label: &str, biometric: bool) -> Result<Self, String> {
+        pub fn new(
+            app_name: &str,
+            key_label: &str,
+            access_policy: AccessPolicy,
+        ) -> Result<Self, String> {
             let encryptor = TpmEncryptor::new(app_name);
 
             if !encryptor.is_available() {
@@ -85,7 +79,7 @@ mod platform {
                 &encryptor,
                 &metadata::keys_dir(app_name),
                 key_label,
-                biometric,
+                access_policy,
             )?;
 
             Ok(Self {
@@ -122,19 +116,25 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
+    use enclaveapp_core::types::AccessPolicy;
+
     pub struct TpmStorage {
         _app_name: String,
         _key_label: String,
-        _biometric: bool,
+        _access_policy: AccessPolicy,
     }
 
     impl TpmStorage {
         #[allow(clippy::unnecessary_wraps)]
-        pub fn new(app_name: &str, key_label: &str, biometric: bool) -> Result<Self, String> {
+        pub fn new(
+            app_name: &str,
+            key_label: &str,
+            access_policy: AccessPolicy,
+        ) -> Result<Self, String> {
             Ok(Self {
                 _app_name: app_name.to_string(),
                 _key_label: key_label.to_string(),
-                _biometric: biometric,
+                _access_policy: access_policy,
             })
         }
 
@@ -271,7 +271,7 @@ mod tests {
         let dir = test_dir();
         let encryptor = FakeEncryptor::default();
 
-        ensure_key(&encryptor, &dir, "cache-key", true).unwrap();
+        ensure_key(&encryptor, &dir, "cache-key", AccessPolicy::BiometricOnly).unwrap();
 
         assert!(encryptor.deleted_labels().is_empty());
         assert_eq!(
@@ -297,7 +297,7 @@ mod tests {
         .unwrap();
         let encryptor = FakeEncryptor::with_existing_key();
 
-        ensure_key(&encryptor, &dir, "cache-key", true).unwrap();
+        ensure_key(&encryptor, &dir, "cache-key", AccessPolicy::BiometricOnly).unwrap();
 
         assert_eq!(encryptor.deleted_labels(), vec!["cache-key".to_string()]);
         assert_eq!(
@@ -327,7 +327,7 @@ mod tests {
         .unwrap();
         let encryptor = FakeEncryptor::with_existing_key();
 
-        ensure_key(&encryptor, &dir, "cache-key", true).unwrap();
+        ensure_key(&encryptor, &dir, "cache-key", AccessPolicy::BiometricOnly).unwrap();
 
         assert!(encryptor.deleted_labels().is_empty());
         assert!(encryptor.generated_calls().is_empty());

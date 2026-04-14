@@ -11,6 +11,7 @@ mod tpm;
 
 use base64::prelude::*;
 use enclaveapp_bridge::BridgeResponse;
+use enclaveapp_core::types::AccessPolicy;
 use serde::Deserialize;
 use std::io::{self, BufRead, Write};
 
@@ -29,7 +30,7 @@ struct BridgeParamsCompat {
     #[serde(default)]
     data: String,
     #[serde(default)]
-    biometric: bool,
+    access_policy: AccessPolicy,
     #[serde(default)]
     app_name: String,
     #[serde(default)]
@@ -60,11 +61,10 @@ fn handle_request(
 ) -> BridgeResponse {
     match request.method.as_str() {
         "init" => {
-            let biometric = request.params.biometric;
             match tpm::TpmStorage::new(
                 request.params.app_name(),
                 request.params.key_label(),
-                biometric,
+                request.params.access_policy,
             ) {
                 Ok(s) => {
                     *storage = Some(s);
@@ -165,12 +165,12 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn make_request(method: &str, data: &str, biometric: bool) -> BridgeRequestCompat {
+    fn make_request(method: &str, data: &str, access_policy: AccessPolicy) -> BridgeRequestCompat {
         BridgeRequestCompat {
             method: method.to_string(),
             params: BridgeParamsCompat {
                 data: data.to_string(),
-                biometric,
+                access_policy,
                 app_name: DEFAULT_APP_NAME.to_string(),
                 key_label: DEFAULT_KEY_LABEL.to_string(),
             },
@@ -179,10 +179,10 @@ mod tests {
 
     #[test]
     fn parse_init_request() {
-        let json = r#"{"method": "init", "params": {"biometric": false}}"#;
+        let json = r#"{"method": "init", "params": {"access_policy": "none"}}"#;
         let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "init");
-        assert!(!req.params.biometric);
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
         assert_eq!(req.params.app_name(), DEFAULT_APP_NAME);
         assert_eq!(req.params.key_label(), DEFAULT_KEY_LABEL);
     }
@@ -192,7 +192,7 @@ mod tests {
         let json = r#"{"method": "init", "params": {}}"#;
         let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "init");
-        assert!(!req.params.biometric);
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
         assert!(req.params.data.is_empty());
         assert_eq!(req.params.app_name(), DEFAULT_APP_NAME);
         assert_eq!(req.params.key_label(), DEFAULT_KEY_LABEL);
@@ -200,7 +200,8 @@ mod tests {
 
     #[test]
     fn parse_encrypt_request() {
-        let json = r#"{"method": "encrypt", "params": {"data": "aGVsbG8=", "biometric": false}}"#;
+        let json =
+            r#"{"method": "encrypt", "params": {"data": "aGVsbG8=", "access_policy": "none"}}"#;
         let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "encrypt");
         assert_eq!(req.params.data, "aGVsbG8=");
@@ -233,7 +234,7 @@ mod tests {
 
     #[test]
     fn parse_request_uses_binary_defaults_for_legacy_payloads() {
-        let json = r#"{"method":"init","params":{"biometric":true}}"#;
+        let json = r#"{"method":"init","params":{"access_policy":"biometric_only"}}"#;
         let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
         assert_eq!(req.params.app_name(), DEFAULT_APP_NAME);
         assert_eq!(req.params.key_label(), DEFAULT_KEY_LABEL);
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn handle_init_creates_storage() {
-        let req = make_request("init", "", false);
+        let req = make_request("init", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         // On non-Windows, init succeeds (stub creates the struct)
@@ -269,7 +270,7 @@ mod tests {
 
     #[test]
     fn handle_destroy_clears_storage() {
-        let req = make_request("destroy", "", false);
+        let req = make_request("destroy", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         assert!(resp.result.is_some() || resp.error.is_some());
@@ -278,7 +279,7 @@ mod tests {
 
     #[test]
     fn handle_delete_clears_storage() {
-        let req = make_request("delete", "", false);
+        let req = make_request("delete", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         assert!(resp.result.is_some() || resp.error.is_some());
@@ -287,7 +288,7 @@ mod tests {
 
     #[test]
     fn handle_unknown_method() {
-        let req = make_request("bogus", "", false);
+        let req = make_request("bogus", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         assert!(resp
@@ -298,7 +299,7 @@ mod tests {
 
     #[test]
     fn handle_encrypt_without_init() {
-        let req = make_request("encrypt", "aGVsbG8=", false);
+        let req = make_request("encrypt", "aGVsbG8=", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         assert!(resp
@@ -309,7 +310,7 @@ mod tests {
 
     #[test]
     fn handle_decrypt_without_init() {
-        let req = make_request("decrypt", "Y2lwaGVy", false);
+        let req = make_request("decrypt", "Y2lwaGVy", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
         assert!(resp
@@ -320,26 +321,26 @@ mod tests {
 
     #[test]
     fn handle_encrypt_missing_data() {
-        let req = make_request("encrypt", "", false);
+        let req = make_request("encrypt", "", AccessPolicy::None);
         // On platforms without a TPM, new() may fail and storage is None,
         // so we get "not initialized" instead of "missing data". Both are valid errors.
-        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", AccessPolicy::None).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
 
     #[test]
     fn handle_encrypt_invalid_base64() {
-        let req = make_request("encrypt", "not-valid-base64!!!", false);
-        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
+        let req = make_request("encrypt", "not-valid-base64!!!", AccessPolicy::None);
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", AccessPolicy::None).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
 
     #[test]
     fn handle_decrypt_missing_data() {
-        let req = make_request("decrypt", "", false);
-        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).ok();
+        let req = make_request("decrypt", "", AccessPolicy::None);
+        let mut storage = tpm::TpmStorage::new("sso-jwt", "cache-key", AccessPolicy::None).ok();
         let resp = handle_request(&req, &mut storage);
         assert!(resp.error.is_some());
     }
@@ -347,7 +348,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn encrypt_returns_platform_error_on_non_windows() {
-        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).unwrap();
+        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", AccessPolicy::None).unwrap();
         let result = storage.encrypt(b"hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only supported on Windows"));
@@ -356,7 +357,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn decrypt_returns_platform_error_on_non_windows() {
-        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", false).unwrap();
+        let storage = tpm::TpmStorage::new("sso-jwt", "cache-key", AccessPolicy::None).unwrap();
         let result = storage.decrypt(b"hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only supported on Windows"));
@@ -365,8 +366,8 @@ mod tests {
     #[test]
     fn roundtrip_json_protocol() {
         // Simulate the full JSON protocol flow
-        let init_json = r#"{"method":"init","params":{"app_name":"sso-jwt","key_label":"cache-key","biometric":false}}"#;
-        let encrypt_json = r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","app_name":"sso-jwt","key_label":"cache-key","biometric":false}}"#;
+        let init_json = r#"{"method":"init","params":{"app_name":"sso-jwt","key_label":"cache-key","access_policy":"none"}}"#;
+        let encrypt_json = r#"{"method":"encrypt","params":{"data":"aGVsbG8gd29ybGQ=","app_name":"sso-jwt","key_label":"cache-key","access_policy":"none"}}"#;
         let destroy_json =
             r#"{"method":"destroy","params":{"app_name":"sso-jwt","key_label":"cache-key"}}"#;
 
