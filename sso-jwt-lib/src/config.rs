@@ -495,6 +495,9 @@ mod tests {
         saved: Vec<Option<String>>,
         prev_xdg: Option<String>,
         prev_home: Option<String>,
+        prev_appdata: Option<String>,
+        prev_local_app_data: Option<String>,
+        prev_user_profile: Option<String>,
         _dir: tempfile::TempDir,
     }
 
@@ -509,6 +512,18 @@ mod tests {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
             }
+            match &self.prev_appdata {
+                Some(value) => std::env::set_var("APPDATA", value),
+                None => std::env::remove_var("APPDATA"),
+            }
+            match &self.prev_local_app_data {
+                Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+            match &self.prev_user_profile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
         }
     }
 
@@ -516,13 +531,22 @@ mod tests {
         let saved = save_and_clear_env();
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
+        let prev_appdata = std::env::var("APPDATA").ok();
+        let prev_local_app_data = std::env::var("LOCALAPPDATA").ok();
+        let prev_user_profile = std::env::var("USERPROFILE").ok();
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("APPDATA", dir.path());
+        std::env::set_var("LOCALAPPDATA", dir.path());
+        std::env::set_var("USERPROFILE", dir.path());
         TestEnvGuard {
             saved,
             prev_xdg,
             prev_home,
+            prev_appdata,
+            prev_local_app_data,
+            prev_user_profile,
             _dir: dir,
         }
     }
