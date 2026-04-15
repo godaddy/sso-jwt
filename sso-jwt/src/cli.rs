@@ -65,7 +65,7 @@ pub enum Commands {
     /// Print shell integration script for export detection
     ShellInit {
         /// Shell type (auto-detected if omitted, or pass "auto")
-        #[arg(value_parser = ["bash", "zsh", "fish", "auto"])]
+        #[arg(value_parser = ["bash", "zsh", "fish", "powershell", "pwsh", "auto"])]
         shell: Option<String>,
     },
 
