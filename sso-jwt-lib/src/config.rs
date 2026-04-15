@@ -1244,4 +1244,92 @@ oauth_url = "https://sso.example.com/device"
             .expect_err("cleartext heartbeat_url should fail");
         assert!(error.to_string().contains("heartbeat_url must use HTTPS"));
     }
+
+    #[test]
+    fn env_var_cleartext_heartbeat_url_is_rejected() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
+
+        std::env::set_var("SSOJWT_OAUTH_URL", "https://custom.example.com/oauth");
+        std::env::set_var(
+            "SSOJWT_HEARTBEAT_URL",
+            "http://custom.example.com/heartbeat",
+        );
+
+        let mut cfg = Config::load().expect("Config::load should succeed");
+        let error = cfg
+            .resolve_server()
+            .expect_err("cleartext heartbeat_url should fail");
+        assert!(error.to_string().contains("heartbeat_url must use HTTPS"));
+    }
+
+    #[test]
+    fn resolve_server_rejects_cleartext_environment_oauth_url() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
+
+        let fc = FileConfig {
+            default_server: Some("myco".into()),
+            risk_level: None,
+            biometric: None,
+            cache_name: None,
+            servers: Some(HashMap::from([(
+                "myco".into(),
+                ServerFileConfig {
+                    client_id: Some("file-client".into()),
+                    environments: Some(HashMap::from([(
+                        "prod".into(),
+                        EnvironmentFileConfig {
+                            default: Some(true),
+                            oauth_url: Some("http://auth.example.com/device".into()),
+                            token_url: None,
+                            heartbeat_url: None,
+                        },
+                    )])),
+                },
+            )])),
+        };
+        Config::save_file_config(&fc).expect("save config");
+
+        let mut cfg = Config::load().expect("load config");
+        let error = cfg
+            .resolve_server()
+            .expect_err("cleartext oauth_url should fail");
+        assert!(error.to_string().contains("oauth_url must use HTTPS"));
+    }
+
+    #[test]
+    fn resolve_server_rejects_cleartext_environment_token_url() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = isolated_env_guard();
+
+        let fc = FileConfig {
+            default_server: Some("myco".into()),
+            risk_level: None,
+            biometric: None,
+            cache_name: None,
+            servers: Some(HashMap::from([(
+                "myco".into(),
+                ServerFileConfig {
+                    client_id: Some("file-client".into()),
+                    environments: Some(HashMap::from([(
+                        "prod".into(),
+                        EnvironmentFileConfig {
+                            default: Some(true),
+                            oauth_url: Some("https://auth.example.com/device".into()),
+                            token_url: Some("http://auth.example.com/token".into()),
+                            heartbeat_url: None,
+                        },
+                    )])),
+                },
+            )])),
+        };
+        Config::save_file_config(&fc).expect("save config");
+
+        let mut cfg = Config::load().expect("load config");
+        let error = cfg
+            .resolve_server()
+            .expect_err("cleartext token_url should fail");
+        assert!(error.to_string().contains("token_url must use HTTPS"));
+    }
 }

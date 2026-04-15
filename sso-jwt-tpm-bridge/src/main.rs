@@ -31,6 +31,10 @@ struct BridgeParamsCompat {
     data: String,
     #[serde(default)]
     access_policy: AccessPolicy,
+    /// Legacy field: older bridge clients send `"biometric": true` instead of
+    /// `"access_policy": "biometric_only"`. Kept for backward compatibility.
+    #[serde(default)]
+    biometric: bool,
     #[serde(default)]
     app_name: String,
     #[serde(default)]
@@ -53,6 +57,18 @@ impl BridgeParamsCompat {
             &self.key_label
         }
     }
+
+    /// Resolve the effective access policy, falling back to the legacy
+    /// `biometric` boolean when `access_policy` is unset (defaults to `None`).
+    fn effective_access_policy(&self) -> AccessPolicy {
+        if self.access_policy != AccessPolicy::None {
+            return self.access_policy;
+        }
+        if self.biometric {
+            return AccessPolicy::BiometricOnly;
+        }
+        AccessPolicy::None
+    }
 }
 
 fn handle_request(
@@ -64,7 +80,7 @@ fn handle_request(
             match tpm::TpmStorage::new(
                 request.params.app_name(),
                 request.params.key_label(),
-                request.params.access_policy,
+                request.params.effective_access_policy(),
             ) {
                 Ok(s) => {
                     *storage = Some(s);
@@ -171,6 +187,7 @@ mod tests {
             params: BridgeParamsCompat {
                 data: data.to_string(),
                 access_policy,
+                biometric: false,
                 app_name: DEFAULT_APP_NAME.to_string(),
                 key_label: DEFAULT_KEY_LABEL.to_string(),
             },
@@ -234,10 +251,30 @@ mod tests {
 
     #[test]
     fn parse_request_uses_binary_defaults_for_legacy_payloads() {
-        let json = r#"{"method":"init","params":{"access_policy":"biometric_only"}}"#;
+        // Legacy clients send `"biometric": true` instead of `"access_policy": "biometric_only"`
+        let json = r#"{"method":"init","params":{"biometric":true}}"#;
         let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert!(req.params.biometric);
+        assert_eq!(req.params.access_policy, AccessPolicy::None);
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::BiometricOnly,
+            "legacy biometric:true should map to BiometricOnly"
+        );
         assert_eq!(req.params.app_name(), DEFAULT_APP_NAME);
         assert_eq!(req.params.key_label(), DEFAULT_KEY_LABEL);
+    }
+
+    #[test]
+    fn effective_access_policy_prefers_explicit_over_legacy() {
+        // When both fields are set, access_policy wins
+        let json = r#"{"method":"init","params":{"access_policy":"any","biometric":true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::Any,
+            "explicit access_policy should take precedence over biometric"
+        );
     }
 
     #[test]
@@ -261,11 +298,11 @@ mod tests {
         let resp = handle_request(&req, &mut storage);
         // On non-Windows, init succeeds (stub creates the struct)
         // but encrypt/decrypt will fail at runtime
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            json.contains("\"result\"") || json.contains("\"error\""),
-            "response should be valid JSON"
-        );
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "error message should not be empty");
+        } else {
+            assert!(resp.result.is_some(), "should return a result on success");
+        }
     }
 
     #[test]
@@ -273,7 +310,11 @@ mod tests {
         let req = make_request("destroy", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
-        assert!(resp.result.is_some() || resp.error.is_some());
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "error message should not be empty");
+        } else {
+            assert!(resp.result.is_some(), "should return a result on success");
+        }
         assert!(storage.is_none());
     }
 
@@ -282,7 +323,11 @@ mod tests {
         let req = make_request("delete", "", AccessPolicy::None);
         let mut storage = None;
         let resp = handle_request(&req, &mut storage);
-        assert!(resp.result.is_some() || resp.error.is_some());
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "error message should not be empty");
+        } else {
+            assert!(resp.result.is_some(), "should return a result on success");
+        }
         assert!(storage.is_none());
     }
 
@@ -376,30 +421,37 @@ mod tests {
         // Init
         let req: BridgeRequestCompat = serde_json::from_str(init_json).unwrap();
         let resp = handle_request(&req, &mut storage);
-        let resp_json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            resp_json.contains("\"result\"") || resp_json.contains("\"error\""),
-            "response should be valid JSON-RPC"
-        );
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "init error should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "init should return a result on success"
+            );
+        }
 
         // Encrypt (will fail on non-Windows, which is expected)
         let req: BridgeRequestCompat = serde_json::from_str(encrypt_json).unwrap();
         let resp = handle_request(&req, &mut storage);
-        let resp_json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            resp_json.contains("\"result\"") || resp_json.contains("\"error\""),
-            "response should be valid JSON-RPC"
-        );
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "encrypt error should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "encrypt should return a result on success"
+            );
+        }
 
         // Destroy
         let req: BridgeRequestCompat = serde_json::from_str(destroy_json).unwrap();
         let resp = handle_request(&req, &mut storage);
-        let resp_json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            resp_json.contains("\"result\"") || resp_json.contains("\"error\""),
-            "response should be valid JSON-RPC"
-        );
-        if resp.result.is_some() {
+        if let Some(err) = &resp.error {
+            assert!(!err.is_empty(), "destroy error should not be empty");
+        } else {
+            assert!(
+                resp.result.is_some(),
+                "destroy should return a result on success"
+            );
             assert!(storage.is_none());
         }
     }
@@ -409,5 +461,60 @@ mod tests {
         let bad_json = "this is not json";
         let result = serde_json::from_str::<BridgeRequestCompat>(bad_json);
         assert!(result.is_err());
+    }
+
+    // ---- effective_access_policy exhaustive variant tests ----
+
+    #[test]
+    fn effective_access_policy_none_default() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn effective_access_policy_any() {
+        let json = r#"{"method":"init","params":{"access_policy":"any"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::Any);
+    }
+
+    #[test]
+    fn effective_access_policy_password_only() {
+        let json = r#"{"method":"init","params":{"access_policy":"password_only"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly
+        );
+    }
+
+    #[test]
+    fn legacy_biometric_false_is_none() {
+        let json = r#"{"method":"init","params":{"biometric":false}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn both_fields_access_policy_wins_over_biometric() {
+        let json =
+            r#"{"method":"init","params":{"access_policy":"password_only","biometric":true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly,
+            "explicit access_policy should take precedence over legacy biometric field"
+        );
+    }
+
+    #[test]
+    fn empty_params_all_defaults() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+        assert_eq!(req.params.data, "");
+        assert_eq!(req.params.app_name, "");
+        assert_eq!(req.params.key_label, "");
     }
 }
