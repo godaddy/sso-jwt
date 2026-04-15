@@ -445,12 +445,10 @@ dependencies = [
 name = "enclaveapp-apple"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "base64 0.22.1",
  "dirs",
  "enclaveapp-core",
  "libc",
- "rand 0.8.5",
  "serde",
  "serde_json",
 ]
@@ -463,6 +461,13 @@ dependencies = [
  "enclaveapp-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-cache"
+version = "0.1.0"
+dependencies = [
+ "enclaveapp-core",
 ]
 
 [[package]]
@@ -507,6 +512,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "enclaveapp-tpm-bridge"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2021,6 +2037,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "enclaveapp-app-storage",
+ "enclaveapp-cache",
  "enclaveapp-core",
  "mockito",
  "open",
@@ -2049,12 +2066,7 @@ dependencies = [
 name = "sso-jwt-tpm-bridge"
 version = "0.5.6"
 dependencies = [
- "base64 0.22.1",
- "enclaveapp-bridge",
- "enclaveapp-core",
- "enclaveapp-windows",
- "serde",
- "serde_json",
+ "enclaveapp-tpm-bridge",
 ]
 
 [[package]]

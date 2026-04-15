@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Context, Result};
-use enclaveapp_core::metadata;
+use anyhow::{Context, Result};
+use enclaveapp_cache::{read_u64_be, write_u64_be, CacheEntry, CacheFormat};
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,10 +9,12 @@ use crate::jwt;
 use crate::oauth;
 use enclaveapp_app_storage::EncryptionStorage;
 
-// Cache file magic bytes
-const MAGIC: &[u8; 4] = b"SJWT";
-const FORMAT_VERSION: u8 = 0x01;
-const HEADER_SIZE: usize = 26; // 4 + 1 + 1 + 8 + 8 + 4
+/// App-specific header: token_iat (u64 BE) + session_start (u64 BE) = 16 bytes.
+const HEADER_DATA_LEN: usize = 16;
+
+fn cache_format() -> CacheFormat {
+    CacheFormat::new(*b"SJWT", 0x01)
+}
 
 /// Token lifecycle state, determined from the cache header without decrypting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +33,10 @@ pub enum TokenState {
 /// These fields are readable without decrypting so we can check expiration
 /// without an unnecessary Secure Enclave / TPM call.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct CacheHeader {
     pub risk_level: u8,
     pub token_iat: u64,
     pub session_start: u64,
-    pub ciphertext_len: u32,
 }
 
 fn now_secs() -> u64 {
@@ -149,63 +148,34 @@ pub fn classify_token_at(
 
 /// Read the cache file header without decrypting the ciphertext.
 pub fn read_header(path: &Path) -> Result<Option<CacheHeader>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let mut file = fs::File::open(path).context("failed to open cache file")?;
-    let mut header_buf = [0_u8; HEADER_SIZE];
-
-    match file.read_exact(&mut header_buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Ok(None); // truncated/corrupt file
+    let fmt = cache_format();
+    match fmt.read_header(path, HEADER_DATA_LEN) {
+        Ok(Some((flags, header_data))) => {
+            let token_iat = read_u64_be(&header_data, 0);
+            let session_start = read_u64_be(&header_data, 8);
+            Ok(Some(CacheHeader {
+                risk_level: flags,
+                token_iat,
+                session_start,
+            }))
         }
-        Err(e) => return Err(e.into()),
+        // Missing file or format error (bad magic, bad version, truncated) => no valid cache
+        Ok(None) | Err(_) => Ok(None),
     }
-
-    // Validate magic
-    if &header_buf[0..4] != MAGIC {
-        return Ok(None); // not a valid cache file
-    }
-
-    // Validate version
-    if header_buf[4] != FORMAT_VERSION {
-        return Ok(None); // incompatible version
-    }
-
-    let risk_level = header_buf[5];
-    let token_iat = u64::from_be_bytes(
-        header_buf[6..14]
-            .try_into()
-            .map_err(|_| anyhow!("cache header: invalid token_iat slice"))?,
-    );
-    let session_start = u64::from_be_bytes(
-        header_buf[14..22]
-            .try_into()
-            .map_err(|_| anyhow!("cache header: invalid session_start slice"))?,
-    );
-    let ciphertext_len = u32::from_be_bytes(
-        header_buf[22..26]
-            .try_into()
-            .map_err(|_| anyhow!("cache header: invalid ciphertext_len slice"))?,
-    );
-
-    Ok(Some(CacheHeader {
-        risk_level,
-        token_iat,
-        session_start,
-        ciphertext_len,
-    }))
 }
 
-/// Read the encrypted ciphertext blob from the cache file (skipping header).
-fn read_ciphertext(path: &Path, expected_len: u32) -> Result<Vec<u8>> {
-    let data = fs::read(path).context("failed to read cache file")?;
-    if data.len() < HEADER_SIZE + expected_len as usize {
-        return Err(anyhow!("cache file truncated"));
-    }
-    Ok(data[HEADER_SIZE..HEADER_SIZE + expected_len as usize].to_vec())
+/// Read the full cache entry and return the JWT ciphertext blob.
+fn read_ciphertext(path: &Path) -> Result<Vec<u8>> {
+    let fmt = cache_format();
+    let entry = fmt
+        .read(path, HEADER_DATA_LEN)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| anyhow::anyhow!("cache file missing or corrupt"))?;
+    entry
+        .blobs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("cache file has no ciphertext blob"))
 }
 
 fn remove_cache_copy(path: &Path) -> Result<()> {
@@ -261,23 +231,20 @@ pub fn write_cache(
         .encrypt(token.as_bytes())
         .context("failed to encrypt token")?;
 
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).context("failed to create cache directory")?;
-    }
+    let mut header_data = Vec::with_capacity(HEADER_DATA_LEN);
+    write_u64_be(&mut header_data, token_iat);
+    write_u64_be(&mut header_data, session_start);
 
-    let mut data = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
-    data.extend_from_slice(MAGIC);
-    data.push(FORMAT_VERSION);
-    data.push(risk_level);
-    data.extend_from_slice(&token_iat.to_be_bytes());
-    data.extend_from_slice(&session_start.to_be_bytes());
-    data.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    data.extend_from_slice(&ciphertext);
+    let entry = CacheEntry {
+        flags: risk_level,
+        header_data,
+        blobs: vec![ciphertext],
+    };
 
-    metadata::atomic_write(path, &data).context("failed to create cache file")?;
-    #[cfg(unix)]
-    metadata::restrict_file_permissions(path).context("failed to secure cache file")?;
+    let fmt = cache_format();
+    fmt.write(path, &entry, HEADER_DATA_LEN)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("failed to write cache file")?;
 
     Ok(())
 }
@@ -354,7 +321,7 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
         match state {
             TokenState::Fresh => {
                 // Decrypt and return
-                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
+                let ciphertext = read_ciphertext(&cache_path)?;
                 let plaintext = storage
                     .decrypt(&ciphertext)
                     .context("failed to decrypt cached token")?;
@@ -373,7 +340,7 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
 
             TokenState::RefreshWindow => {
                 // Decrypt, try refresh, fall back to cached
-                let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
+                let ciphertext = read_ciphertext(&cache_path)?;
                 let plaintext = storage
                     .decrypt(&ciphertext)
                     .context("failed to decrypt cached token")?;
@@ -437,7 +404,7 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                 // If no heartbeat URL, treat like Dead (go straight to re-auth)
                 if let Some(ref heartbeat_url) = config.heartbeat_url {
                     // Decrypt, try refresh, fall back to full re-auth
-                    let ciphertext = read_ciphertext(&cache_path, header.ciphertext_len)?;
+                    let ciphertext = read_ciphertext(&cache_path)?;
                     let plaintext = storage
                         .decrypt(&ciphertext)
                         .context("failed to decrypt cached token")?;
@@ -752,7 +719,6 @@ mod tests {
         assert_eq!(header.risk_level, 2);
         assert_eq!(header.token_iat, 1700000000);
         assert_eq!(header.session_start, 1700000000);
-        assert!(header.ciphertext_len > 0);
     }
 
     #[test]
@@ -764,8 +730,7 @@ mod tests {
 
         write_cache(&path, &storage, &token, 2, 1700000000).unwrap();
 
-        let header = read_header(&path).unwrap().unwrap();
-        let ciphertext = read_ciphertext(&path, header.ciphertext_len).unwrap();
+        let ciphertext = read_ciphertext(&path).unwrap();
         let plaintext = storage.decrypt(&ciphertext).unwrap();
         let recovered = String::from_utf8(plaintext).unwrap();
         assert_eq!(recovered, token);
@@ -798,8 +763,8 @@ mod tests {
     fn wrong_version_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ver.enc");
-        let mut data = vec![0_u8; HEADER_SIZE + 10];
-        data[0..4].copy_from_slice(MAGIC);
+        let mut data = vec![0_u8; 6 + HEADER_DATA_LEN + 10];
+        data[0..4].copy_from_slice(b"SJWT");
         data[4] = 0xFF; // bad version
         fs::write(&path, &data).unwrap();
         assert!(read_header(&path).unwrap().is_none());
@@ -986,46 +951,51 @@ mod tests {
     // ---- Cache format edge cases ----
 
     #[test]
-    fn header_only_file_with_zero_ciphertext_len() {
+    fn header_only_file_with_no_blobs() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("header_only.enc");
 
-        // Build a valid header with ciphertext_len = 0
-        let mut data = Vec::with_capacity(HEADER_SIZE);
-        data.extend_from_slice(MAGIC);
-        data.push(FORMAT_VERSION);
-        data.push(2); // risk_level
-        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // token_iat
-        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // session_start
-        data.extend_from_slice(&0_u32.to_be_bytes()); // ciphertext_len = 0
-        assert_eq!(data.len(), HEADER_SIZE);
-        fs::write(&path, &data).expect("write header-only file");
+        // Build a valid cache entry with no blobs
+        let fmt = cache_format();
+        let mut header_data = Vec::with_capacity(HEADER_DATA_LEN);
+        write_u64_be(&mut header_data, 1700000000); // token_iat
+        write_u64_be(&mut header_data, 1700000000); // session_start
+        let entry = CacheEntry {
+            flags: 2, // risk_level
+            header_data,
+            blobs: vec![],
+        };
+        fmt.write(&path, &entry, HEADER_DATA_LEN)
+            .expect("write header-only file");
 
         let header = read_header(&path)
             .expect("read_header")
             .expect("header present");
-        assert_eq!(header.ciphertext_len, 0);
+        assert_eq!(header.risk_level, 2);
+        assert_eq!(header.token_iat, 1700000000);
 
-        let ct = read_ciphertext(&path, 0).expect("read empty ciphertext");
-        assert!(ct.is_empty());
+        // read_ciphertext should fail because there are no blobs
+        let result = read_ciphertext(&path);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn ciphertext_len_larger_than_actual_data_returns_error() {
+    fn truncated_blob_data_returns_error() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("short_ct.enc");
 
-        let mut data = Vec::with_capacity(HEADER_SIZE + 5);
-        data.extend_from_slice(MAGIC);
-        data.push(FORMAT_VERSION);
-        data.push(2);
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&100_u32.to_be_bytes()); // claims 100 bytes
+        // Build raw bytes: valid prefix + header_data + truncated blob
+        let mut data = Vec::new();
+        data.extend_from_slice(b"SJWT"); // magic
+        data.push(0x01); // version
+        data.push(2); // flags (risk_level)
+        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // token_iat
+        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // session_start
+        data.extend_from_slice(&100_u32.to_be_bytes()); // blob claims 100 bytes
         data.extend_from_slice(&[0xAA; 5]); // but only 5 bytes present
-        fs::write(&path, &data).expect("write truncated ciphertext file");
+        fs::write(&path, &data).expect("write truncated blob file");
 
-        let result = read_ciphertext(&path, 100);
+        let result = read_ciphertext(&path);
         assert!(result.is_err());
     }
 
@@ -1038,17 +1008,17 @@ mod tests {
     }
 
     #[test]
-    fn file_with_exactly_header_size_bytes() {
+    fn file_with_header_only_no_blobs() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("exact_header.enc");
 
-        let mut data = vec![0_u8; HEADER_SIZE];
-        data[0..4].copy_from_slice(MAGIC);
-        data[4] = FORMAT_VERSION;
-        data[5] = 3; // risk_level
-        data[6..14].copy_from_slice(&42_u64.to_be_bytes());
-        data[14..22].copy_from_slice(&99_u64.to_be_bytes());
-        data[22..26].copy_from_slice(&0_u32.to_be_bytes());
+        // Build raw bytes: prefix (6 bytes) + header_data (16 bytes) = 22 bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(b"SJWT"); // magic
+        data.push(0x01); // version
+        data.push(3); // flags (risk_level)
+        data.extend_from_slice(&42_u64.to_be_bytes()); // token_iat
+        data.extend_from_slice(&99_u64.to_be_bytes()); // session_start
         fs::write(&path, &data).expect("write exact header file");
 
         let header = read_header(&path)
@@ -1057,7 +1027,6 @@ mod tests {
         assert_eq!(header.risk_level, 3);
         assert_eq!(header.token_iat, 42);
         assert_eq!(header.session_start, 99);
-        assert_eq!(header.ciphertext_len, 0);
     }
 
     #[test]
@@ -1093,10 +1062,7 @@ mod tests {
 
         write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
-        let header = read_header(&path)
-            .expect("read_header")
-            .expect("header present");
-        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
+        let ct = read_ciphertext(&path).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         let recovered = String::from_utf8(pt).expect("valid utf-8");
         assert_eq!(recovered, token);
@@ -1118,10 +1084,7 @@ mod tests {
 
         write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
-        let header = read_header(&path)
-            .expect("read_header")
-            .expect("header present");
-        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
+        let ct = read_ciphertext(&path).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         let recovered = String::from_utf8(pt).expect("valid utf-8");
         assert_eq!(recovered, token);
@@ -1158,7 +1121,7 @@ mod tests {
         );
 
         // Verify the token itself round-trips
-        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
+        let ct = read_ciphertext(&path).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         let recovered = String::from_utf8(pt).expect("valid utf-8");
         assert_eq!(recovered, token);
@@ -1171,17 +1134,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("trunc_ct.enc");
 
-        let mut data = Vec::with_capacity(HEADER_SIZE + 50);
-        data.extend_from_slice(MAGIC);
-        data.push(FORMAT_VERSION);
-        data.push(2);
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&100_u32.to_be_bytes()); // claims 100 bytes
-        data.extend_from_slice(&[0xBB; 50]); // only 50 bytes after header
+        // Build raw bytes with a blob length that exceeds actual data
+        let mut data = Vec::new();
+        data.extend_from_slice(b"SJWT"); // magic
+        data.push(0x01); // version
+        data.push(2); // flags
+        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // token_iat
+        data.extend_from_slice(&1700000000_u64.to_be_bytes()); // session_start
+        data.extend_from_slice(&100_u32.to_be_bytes()); // blob claims 100 bytes
+        data.extend_from_slice(&[0xBB; 50]); // only 50 bytes present
         fs::write(&path, &data).expect("write file");
 
-        let result = read_ciphertext(&path, 100);
+        let result = read_ciphertext(&path);
         assert!(result.is_err(), "should fail when ciphertext is truncated");
     }
 
@@ -1189,19 +1153,22 @@ mod tests {
     fn read_ciphertext_exact_match() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("exact_ct.enc");
-        let payload = [0xCC; 37];
+        let payload = vec![0xCC; 37];
 
-        let mut data = Vec::with_capacity(HEADER_SIZE + payload.len());
-        data.extend_from_slice(MAGIC);
-        data.push(FORMAT_VERSION);
-        data.push(1);
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&1700000000_u64.to_be_bytes());
-        data.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        data.extend_from_slice(&payload);
-        fs::write(&path, &data).expect("write file");
+        // Build using the cache format
+        let fmt = cache_format();
+        let mut header_data = Vec::with_capacity(HEADER_DATA_LEN);
+        write_u64_be(&mut header_data, 1700000000);
+        write_u64_be(&mut header_data, 1700000000);
+        let entry = CacheEntry {
+            flags: 1,
+            header_data,
+            blobs: vec![payload.clone()],
+        };
+        fmt.write(&path, &entry, HEADER_DATA_LEN)
+            .expect("write file");
 
-        let ct = read_ciphertext(&path, payload.len() as u32).expect("read_ciphertext");
+        let ct = read_ciphertext(&path).expect("read_ciphertext");
         assert_eq!(ct, payload);
     }
 
@@ -1226,7 +1193,7 @@ mod tests {
             .expect("header A present");
         assert_eq!(hdr_a.risk_level, 1);
         assert_eq!(hdr_a.token_iat, 1700000000);
-        let ct_a = read_ciphertext(&path_a, hdr_a.ciphertext_len).expect("read_ciphertext A");
+        let ct_a = read_ciphertext(&path_a).expect("read_ciphertext A");
         let pt_a = storage.decrypt(&ct_a).expect("decrypt A");
         assert_eq!(String::from_utf8(pt_a).expect("utf-8 A"), token_a);
 
@@ -1236,7 +1203,7 @@ mod tests {
             .expect("header B present");
         assert_eq!(hdr_b.risk_level, 3);
         assert_eq!(hdr_b.token_iat, 1700100000);
-        let ct_b = read_ciphertext(&path_b, hdr_b.ciphertext_len).expect("read_ciphertext B");
+        let ct_b = read_ciphertext(&path_b).expect("read_ciphertext B");
         let pt_b = storage.decrypt(&ct_b).expect("decrypt B");
         assert_eq!(String::from_utf8(pt_b).expect("utf-8 B"), token_b);
     }
@@ -1262,7 +1229,7 @@ mod tests {
             .expect("header present");
         assert_eq!(header.token_iat, 1700050000);
 
-        let ct = read_ciphertext(&path, header.ciphertext_len).expect("read_ciphertext");
+        let ct = read_ciphertext(&path).expect("read_ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         let recovered = String::from_utf8(pt).expect("valid utf-8");
         assert_eq!(recovered, token_new);
@@ -1331,12 +1298,14 @@ mod tests {
     fn cache_file_one_byte_short_of_header_returns_none() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("short_header.enc");
-        // HEADER_SIZE is 26, write 25 bytes with valid magic prefix
-        let mut data = Vec::with_capacity(HEADER_SIZE - 1);
-        data.extend_from_slice(MAGIC);
-        data.push(FORMAT_VERSION);
-        data.extend_from_slice(&[0_u8; HEADER_SIZE - 6]); // fill remaining but 1 byte short
-        assert_eq!(data.len(), HEADER_SIZE - 1);
+        // New format: prefix (6 bytes) + header_data (16 bytes) = 22 bytes
+        // Write 21 bytes (one short) with valid magic prefix
+        const TOTAL: usize = 6 + HEADER_DATA_LEN;
+        let mut data = Vec::with_capacity(TOTAL - 1);
+        data.extend_from_slice(b"SJWT"); // magic
+        data.push(0x01); // version
+        data.extend_from_slice(&[0_u8; TOTAL - 5 - 1]); // fill remaining but 1 byte short
+        assert_eq!(data.len(), TOTAL - 1);
         fs::write(&path, &data).expect("write truncated header file");
         assert!(read_header(&path).expect("read_header").is_none());
     }
@@ -1665,10 +1634,10 @@ mod tests {
         );
 
         // Verify the migrated cache is readable
-        let header = read_header(&primary_path)
+        let _header = read_header(&primary_path)
             .expect("read_header")
             .expect("header present");
-        let ct = read_ciphertext(&primary_path, header.ciphertext_len).expect("read ciphertext");
+        let ct = read_ciphertext(&primary_path).expect("read ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         let recovered = String::from_utf8(pt).expect("valid utf-8");
         assert_eq!(recovered, token);
@@ -1776,10 +1745,10 @@ mod tests {
 
         // File should still exist and be readable
         assert!(primary_path.exists());
-        let header = read_header(&primary_path)
+        let _header = read_header(&primary_path)
             .expect("read_header")
             .expect("header present");
-        let ct = read_ciphertext(&primary_path, header.ciphertext_len).expect("read ciphertext");
+        let ct = read_ciphertext(&primary_path).expect("read ciphertext");
         let pt = storage.decrypt(&ct).expect("decrypt");
         assert_eq!(String::from_utf8(pt).expect("valid utf-8"), token);
     }

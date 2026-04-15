@@ -9,6 +9,7 @@ license.workspace = true
 anyhow = "1"
 base64 = "0.22"
 dirs = "6"
+enclaveapp-cache = { workspace = true }
 enclaveapp-core = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
 serde = { version = "1", features = ["derive"] }
