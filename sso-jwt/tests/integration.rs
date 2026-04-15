@@ -258,12 +258,41 @@ fn environment_ote_accepted() {
 #[test]
 fn shell_init_invalid_shell_rejected() {
     let output = Command::new(binary_path())
-        .args(["shell-init", "powershell"])
+        .args(["shell-init", "tcsh"])
         .output()
         .expect("failed to run binary");
     assert!(
         !output.status.success(),
         "invalid shell name should be rejected"
+    );
+}
+
+#[test]
+fn shell_init_powershell_accepted() {
+    let output = Command::new(binary_path())
+        .args(["shell-init", "powershell"])
+        .output()
+        .expect("failed to run binary");
+    assert!(
+        output.status.success(),
+        "powershell should be accepted as a shell-init target"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("$PROFILE"),
+        "powershell output should contain PowerShell-specific content"
+    );
+}
+
+#[test]
+fn shell_init_pwsh_accepted() {
+    let output = Command::new(binary_path())
+        .args(["shell-init", "pwsh"])
+        .output()
+        .expect("failed to run binary");
+    assert!(
+        output.status.success(),
+        "pwsh should be accepted as a shell-init target"
     );
 }
 
