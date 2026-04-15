@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Integration Type
 
-sso-jwt is a **credential source** that can serve Type 1 or Type 2 enclave apps. It provides JWTs via its CLI (`sso-jwt get`) or NAPI bindings, which other tools consume for authentication. When used as a standalone CLI, it caches encrypted JWTs using hardware-backed storage.
+sso-jwt is a **credential source** that can serve [Type 1](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#type-1-helpertool) or [Type 2](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#type-2-envinterpolation) enclave apps. It provides JWTs via its CLI (`sso-jwt get`) or NAPI bindings, which other tools consume for authentication. When used as a standalone CLI, it caches encrypted JWTs using hardware-backed storage. See [libenclaveapp DESIGN.md](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#application-integration-types) for the full integration type taxonomy.
 
 ## Build & Development
 
