@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `sso-jwt` obtains SSO JWTs via the OAuth 2.0 Device Authorization Grant (RFC 8628) with hardware-backed secure caching. Tokens are encrypted at rest using the Secure Enclave (macOS), TPM 2.0 (Windows), or software keys with keyring encryption (Linux).
 
+## Integration Type
+
+sso-jwt is a **credential source** that can serve [Type 1](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#type-1-helpertool) or [Type 2](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#type-2-envinterpolation) enclave apps. It provides JWTs via its CLI (`sso-jwt get`) or NAPI bindings, which other tools consume for authentication. When used as a standalone CLI, it caches encrypted JWTs using hardware-backed storage. See [libenclaveapp DESIGN.md](https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md#application-integration-types) for the full integration type taxonomy.
+
 ## Build & Development
 
 Rust workspace. Requires Rust 1.82+. macOS builds need Xcode (for swiftc via libenclaveapp). Linux builds need `libdbus-1-dev pkg-config`.
