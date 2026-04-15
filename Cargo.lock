@@ -464,6 +464,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-build-support"
+version = "0.1.0"
+dependencies = [
+ "winresource",
+]
+
+[[package]]
 name = "enclaveapp-cache"
 version = "0.1.0"
 dependencies = [
@@ -2023,10 +2030,10 @@ dependencies = [
  "anyhow",
  "clap",
  "enclaveapp-app-storage",
+ "enclaveapp-build-support",
  "enclaveapp-wsl",
  "reqwest",
  "sso-jwt-lib",
- "winresource",
 ]
 
 [[package]]
