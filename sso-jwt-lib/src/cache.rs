@@ -216,8 +216,8 @@ fn remove_cache_copy(path: &Path) -> Result<()> {
 }
 
 #[allow(clippy::print_stderr)]
-fn warn_cache_cleanup_failure(error: &anyhow::Error) {
-    eprintln!("warning: {error}");
+fn warn_migration(msg: &str, error: &anyhow::Error) {
+    eprintln!("warning: {msg}: {error}");
 }
 
 fn maybe_migrate_cache_path(
@@ -233,9 +233,14 @@ fn maybe_migrate_cache_path(
         return Ok(());
     }
 
-    if write_cache(&primary_path, storage, token, risk_level, session_start).is_ok() {
-        if let Err(error) = remove_cache_copy(current_path) {
-            warn_cache_cleanup_failure(&error);
+    match write_cache(&primary_path, storage, token, risk_level, session_start) {
+        Ok(()) => {
+            if let Err(error) = remove_cache_copy(current_path) {
+                warn_migration("failed to remove superseded cache file", &error);
+            }
+        }
+        Err(error) => {
+            warn_migration("cache migration write failed", &error);
         }
     }
 
@@ -389,7 +394,10 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                             )?;
                             if cache_path != primary_cache_path {
                                 if let Err(error) = remove_cache_copy(&cache_path) {
-                                    warn_cache_cleanup_failure(&error);
+                                    warn_migration(
+                                        "failed to remove superseded cache file",
+                                        &error,
+                                    );
                                 }
                             }
                             return Ok(new_token);
@@ -446,7 +454,7 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
                         )?;
                         if cache_path != primary_cache_path {
                             if let Err(error) = remove_cache_copy(&cache_path) {
-                                warn_cache_cleanup_failure(&error);
+                                warn_migration("failed to remove superseded cache file", &error);
                             }
                         }
                         return Ok(new_token);
@@ -481,7 +489,7 @@ pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result
     )?;
     if cache_path != primary_cache_path {
         if let Err(error) = remove_cache_copy(&cache_path) {
-            warn_cache_cleanup_failure(&error);
+            warn_migration("failed to remove superseded cache file", &error);
         }
     }
 
