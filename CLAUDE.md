@@ -63,3 +63,7 @@ token_url = "https://github.com/login/oauth/access_token"
 - Windows: TPM 2.0 via CNG (libenclaveapp)
 - WSL: JSON-RPC bridge to Windows TPM
 - Linux: Software keys with D-Bus Secret Service keyring encryption, or TPM 2.0 via tss-esapi
+
+## Commits
+
+Do not add Co-Authored-By lines for Claude Code in commit messages.
