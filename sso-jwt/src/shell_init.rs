@@ -3,7 +3,7 @@ pub fn generate(shell: &str) -> String {
     let config = make_config();
     // Default to bash for unknown shells
     let effective_shell = match shell {
-        "zsh" | "fish" => shell,
+        "zsh" | "fish" | "powershell" | "pwsh" => shell,
         _ => "bash",
     };
     enclaveapp_wsl::shell_init::generate_shell_init(effective_shell, &config)
@@ -24,7 +24,7 @@ fn make_config() -> enclaveapp_wsl::shell_init::ShellInitConfig {
             "       Use: COMPANY_JWT=$(sso-jwt) your-command".to_string(),
             "       Or:  sso-jwt exec -- your-command".to_string(),
         ],
-        include_powershell: false,
+        include_powershell: true,
         helper_function: None,
         command_wrapper: true,
     }
@@ -73,6 +73,19 @@ mod tests {
         let output = generate("fish");
         assert!(output.contains("function sso-jwt"));
         assert!(output.contains("command sso-jwt"));
+    }
+
+    #[test]
+    fn powershell_output_contains_profile_comment() {
+        let output = generate("powershell");
+        assert!(output.contains("$PROFILE"));
+        assert!(output.contains("sso-jwt shell-init powershell"));
+    }
+
+    #[test]
+    fn pwsh_alias_produces_powershell_output() {
+        let output = generate("pwsh");
+        assert!(output.contains("$PROFILE"));
     }
 
     #[test]
