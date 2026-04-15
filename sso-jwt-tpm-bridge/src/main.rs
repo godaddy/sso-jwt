@@ -462,4 +462,59 @@ mod tests {
         let result = serde_json::from_str::<BridgeRequestCompat>(bad_json);
         assert!(result.is_err());
     }
+
+    // ---- effective_access_policy exhaustive variant tests ----
+
+    #[test]
+    fn effective_access_policy_none_default() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn effective_access_policy_any() {
+        let json = r#"{"method":"init","params":{"access_policy":"any"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::Any);
+    }
+
+    #[test]
+    fn effective_access_policy_password_only() {
+        let json = r#"{"method":"init","params":{"access_policy":"password_only"}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly
+        );
+    }
+
+    #[test]
+    fn legacy_biometric_false_is_none() {
+        let json = r#"{"method":"init","params":{"biometric":false}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+    }
+
+    #[test]
+    fn both_fields_access_policy_wins_over_biometric() {
+        let json =
+            r#"{"method":"init","params":{"access_policy":"password_only","biometric":true}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.params.effective_access_policy(),
+            AccessPolicy::PasswordOnly,
+            "explicit access_policy should take precedence over legacy biometric field"
+        );
+    }
+
+    #[test]
+    fn empty_params_all_defaults() {
+        let json = r#"{"method":"init","params":{}}"#;
+        let req: BridgeRequestCompat = serde_json::from_str(json).unwrap();
+        assert_eq!(req.params.effective_access_policy(), AccessPolicy::None);
+        assert_eq!(req.params.data, "");
+        assert_eq!(req.params.app_name, "");
+        assert_eq!(req.params.key_label, "");
+    }
 }

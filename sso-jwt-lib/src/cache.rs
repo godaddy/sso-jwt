@@ -1613,6 +1613,227 @@ mod tests {
     }
 
     #[test]
+    fn maybe_migrate_cache_path_succeeds_normally() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        // Write to a legacy path (different from the primary cache path)
+        let legacy_path = dir.path().join("old-cache.enc");
+        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
+            .expect("write legacy cache");
+        assert!(legacy_path.exists());
+
+        maybe_migrate_cache_path(
+            &config,
+            &legacy_path,
+            &storage,
+            &token,
+            config.risk_level,
+            now,
+        )
+        .expect("migration should succeed");
+
+        // The primary cache path should now have the content
+        let primary_path = config.cache_file_path();
+        assert!(
+            primary_path.exists(),
+            "primary cache path should exist after migration"
+        );
+        // The legacy path should be removed
+        assert!(
+            !legacy_path.exists(),
+            "legacy cache path should be removed after migration"
+        );
+
+        // Verify the migrated cache is readable
+        let header = read_header(&primary_path)
+            .expect("read_header")
+            .expect("header present");
+        let ct = read_ciphertext(&primary_path, header.ciphertext_len).expect("read ciphertext");
+        let pt = storage.decrypt(&ct).expect("decrypt");
+        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        assert_eq!(recovered, token);
+    }
+
+    #[test]
+    fn maybe_migrate_cache_path_write_failure_preserves_original() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+
+        // Create a config where the primary cache path's parent is a file,
+        // so writing to it will fail.
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        // Write to a legacy path
+        let legacy_path = dir.path().join("old-cache.enc");
+        write_cache(&legacy_path, &storage, &token, config.risk_level, now)
+            .expect("write legacy cache");
+        let original_content = fs::read(&legacy_path).expect("read original");
+
+        // Block the primary path by creating a directory at the exact file path.
+        // atomic_write will fail because it can't replace a directory with a file.
+        let primary_path = config.cache_file_path();
+        fs::create_dir_all(&primary_path).expect("create obstructing directory at primary path");
+
+        // Migration write will fail, but function should still return Ok (best-effort)
+        maybe_migrate_cache_path(
+            &config,
+            &legacy_path,
+            &storage,
+            &token,
+            config.risk_level,
+            now,
+        )
+        .expect("migration write failure should not bubble up");
+
+        // The original file should be untouched
+        assert!(
+            legacy_path.exists(),
+            "original cache should be preserved when migration write fails"
+        );
+        let preserved_content = fs::read(&legacy_path).expect("read preserved");
+        assert_eq!(
+            original_content, preserved_content,
+            "original cache content should be unchanged"
+        );
+    }
+
+    #[test]
+    fn maybe_migrate_cache_path_noop_when_already_primary() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        let primary_path = config.cache_file_path();
+        write_cache(&primary_path, &storage, &token, config.risk_level, now)
+            .expect("write primary cache");
+
+        // Calling migrate with current_path == primary_path is a no-op
+        maybe_migrate_cache_path(
+            &config,
+            &primary_path,
+            &storage,
+            &token,
+            config.risk_level,
+            now,
+        )
+        .expect("no-op migration should succeed");
+
+        // File should still exist and be readable
+        assert!(primary_path.exists());
+        let header = read_header(&primary_path)
+            .expect("read_header")
+            .expect("header present");
+        let ct = read_ciphertext(&primary_path, header.ciphertext_len).expect("read ciphertext");
+        let pt = storage.decrypt(&ct).expect("decrypt");
+        assert_eq!(String::from_utf8(pt).expect("valid utf-8"), token);
+    }
+
+    #[test]
+    fn clear_after_migration_removes_both_paths() {
+        let _lock = crate::config::TEST_ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let _guard = isolate_config_dir(&dir);
+        let storage = MockStorage::new();
+        let now = now_secs();
+        let token = make_jwt(now);
+        let config = Config {
+            server: "alpha".to_string(),
+            environment: Some("prod".to_string()),
+            oauth_url: "https://example.invalid/oauth".to_string(),
+            token_url: None,
+            heartbeat_url: None,
+            client_id: "sso-jwt".to_string(),
+            risk_level: 2,
+            biometric: false,
+            cache_name: "default".to_string(),
+            no_open: false,
+            clear: false,
+        };
+
+        // Write to both the primary and legacy paths
+        let primary_path = config.cache_file_path();
+        write_cache(&primary_path, &storage, &token, config.risk_level, now)
+            .expect("write primary cache");
+        let legacy_path = config
+            .legacy_cache_file_path()
+            .expect("safe config should keep legacy cache lookup");
+        fs::create_dir_all(legacy_path.parent().expect("legacy parent")).expect("mkdir");
+        fs::write(&legacy_path, b"legacy-content").expect("write legacy cache");
+
+        assert!(primary_path.exists());
+        assert!(legacy_path.exists());
+
+        clear(&config).expect("clear cache");
+
+        assert!(
+            !primary_path.exists(),
+            "primary cache should be removed after clear"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "legacy cache should be removed after clear"
+        );
+    }
+
+    #[test]
     fn unsafe_configs_do_not_consult_legacy_cache_paths() {
         let _lock = crate::config::TEST_ENV_MUTEX
             .lock()
