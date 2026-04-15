@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Development
 
-Rust workspace. Requires Rust 1.75+. macOS builds need Xcode (for swiftc via libenclaveapp). Linux builds need `libdbus-1-dev pkg-config`.
+Rust workspace. Requires Rust 1.82+. macOS builds need Xcode (for swiftc via libenclaveapp). Linux builds need `libdbus-1-dev pkg-config`.
 
 ```bash
 cargo build --workspace
