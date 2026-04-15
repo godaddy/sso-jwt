@@ -5,6 +5,8 @@ export interface JwtOptions {
   env?: string;
   /** Override OAuth service URL (bypasses server profile) */
   oauthUrl?: string;
+  /** Override token polling URL (separate from device authorization endpoint) */
+  tokenUrl?: string;
   /** Override heartbeat URL */
   heartbeatUrl?: string;
   /** Override OAuth client ID */

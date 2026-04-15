@@ -819,6 +819,8 @@ another_unknown = 42
 
     #[test]
     fn config_dir_ends_in_sso_jwt() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let dir = Config::config_dir();
         assert!(
             dir.ends_with("sso-jwt"),
@@ -829,6 +831,8 @@ another_unknown = 42
 
     #[test]
     fn config_file_path_ends_in_config_toml() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let path = Config::config_file_path();
         assert!(
             path.to_string_lossy().ends_with("config.toml"),
@@ -957,6 +961,8 @@ another_unknown = 42
 
     #[test]
     fn cache_path_distinguishes_escaped_components() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let mut cfg_a = test_config();
         cfg_a.server = "a/b".to_string();
         cfg_a.cache_name = "prod".to_string();
@@ -972,6 +978,8 @@ another_unknown = 42
 
     #[test]
     fn safe_legacy_cache_path_remains_available_for_migration() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let mut cfg = test_config();
         cfg.server = "alpha".to_string();
         cfg.environment = Some("prod".to_string());
@@ -989,6 +997,8 @@ another_unknown = 42
 
     #[test]
     fn hyphenated_legacy_cache_path_is_not_consulted() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let mut cfg = test_config();
         cfg.server = "alpha-prod".to_string();
         cfg.environment = Some("west-2".to_string());
@@ -1000,6 +1010,8 @@ another_unknown = 42
 
     #[test]
     fn hyphenated_legacy_components_are_treated_as_ambiguous() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let mut cfg_a = test_config();
         cfg_a.server = "a-b".to_string();
         cfg_a.environment = Some("c".to_string());
@@ -1022,6 +1034,8 @@ another_unknown = 42
 
     #[test]
     fn cache_clear_paths_include_ambiguous_legacy_alias() {
+        let _lock = TEST_ENV_MUTEX.lock().expect("env mutex poisoned");
+        std::env::remove_var(TEST_CONFIG_DIR_ENV);
         let mut cfg = test_config();
         cfg.server = "alpha-prod".to_string();
         cfg.environment = Some("west-2".to_string());

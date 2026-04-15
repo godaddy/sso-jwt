@@ -36,12 +36,13 @@ where
 {
     if encryptor.public_key(key_label).is_ok() {
         match existing_policy(keys_dir, key_label) {
-            Some(existing) if existing != policy => {
+            Some(existing) if existing == policy => return Ok(()),
+            _ => {
+                // Policy mismatch or missing metadata -- delete and regenerate
                 encryptor
                     .delete_key(key_label)
                     .map_err(|e| format!("key deletion failed: {e}"))?;
             }
-            _ => return Ok(()),
         }
     }
 
@@ -299,6 +300,28 @@ mod tests {
 
         ensure_key(&encryptor, &dir, "cache-key", AccessPolicy::BiometricOnly).unwrap();
 
+        assert_eq!(encryptor.deleted_labels(), vec!["cache-key".to_string()]);
+        assert_eq!(
+            encryptor.generated_calls(),
+            vec![(
+                "cache-key".to_string(),
+                KeyType::Encryption,
+                AccessPolicy::BiometricOnly
+            )]
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ensure_key_regenerates_when_metadata_absent() {
+        let dir = test_dir();
+        // Key exists but no .meta file on disk
+        let encryptor = FakeEncryptor::with_existing_key();
+
+        ensure_key(&encryptor, &dir, "cache-key", AccessPolicy::BiometricOnly).unwrap();
+
+        // Should delete the old key and regenerate since policy can't be verified
         assert_eq!(encryptor.deleted_labels(), vec!["cache-key".to_string()]);
         assert_eq!(
             encryptor.generated_calls(),
