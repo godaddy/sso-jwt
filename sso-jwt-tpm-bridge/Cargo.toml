@@ -6,6 +6,7 @@ description = "Windows TPM 2.0 bridge for sso-jwt WSL support"
 license.workspace = true
 
 [dependencies]
+enclaveapp-core = { workspace = true }
 enclaveapp-tpm-bridge = { workspace = true }
 
 [lints]

@@ -167,12 +167,15 @@ pub fn run(cli: Cli) -> Result<()> {
             ref env_var,
             ref command,
         }) => {
-            let jwt = resolve_token(&config, cli.keyring)?;
-            exec::run(env_var, &jwt, command)
+            let mut jwt = resolve_token(&config, cli.keyring)?;
+            let result = exec::run(env_var, &jwt, command);
+            zeroize::Zeroize::zeroize(&mut jwt);
+            result
         }
         None => {
-            let jwt = resolve_token(&config, cli.keyring)?;
+            let mut jwt = resolve_token(&config, cli.keyring)?;
             print!("{jwt}");
+            zeroize::Zeroize::zeroize(&mut jwt);
             Ok(())
         }
         _ => unreachable!(),
