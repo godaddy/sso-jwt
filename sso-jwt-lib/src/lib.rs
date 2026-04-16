@@ -86,6 +86,7 @@ pub fn get_jwt(options: &GetJwtOptions) -> anyhow::Result<String> {
         access_policy: policy,
         extra_bridge_paths: vec![],
         keys_dir: None,
+        force_keyring: false,
     })?;
     cache::resolve_token(&config, storage.as_ref())
 }

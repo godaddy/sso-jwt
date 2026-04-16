@@ -23,6 +23,7 @@ fn se_encrypt_decrypt_roundtrip() {
         access_policy: AccessPolicy::None,
         extra_bridge_paths: vec![],
         keys_dir: None,
+        force_keyring: false,
     })
     .expect("failed to create storage");
 

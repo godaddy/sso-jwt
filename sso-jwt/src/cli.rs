@@ -56,6 +56,11 @@ pub struct Cli {
     #[arg(long)]
     pub clear: bool,
 
+    /// Force the system keyring backend (Linux only). Bypasses WSL bridge
+    /// and TPM detection. Requires an unlocked keyring session.
+    #[arg(long)]
+    pub keyring: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -162,11 +167,11 @@ pub fn run(cli: Cli) -> Result<()> {
             ref env_var,
             ref command,
         }) => {
-            let jwt = resolve_token(&config)?;
+            let jwt = resolve_token(&config, cli.keyring)?;
             exec::run(env_var, &jwt, command)
         }
         None => {
-            let jwt = resolve_token(&config)?;
+            let jwt = resolve_token(&config, cli.keyring)?;
             print!("{jwt}");
             Ok(())
         }
@@ -462,7 +467,7 @@ fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
     }
 }
 
-fn resolve_token(config: &Config) -> Result<String> {
+fn resolve_token(config: &Config, force_keyring: bool) -> Result<String> {
     let policy = if config.biometric {
         AccessPolicy::BiometricOnly
     } else {
@@ -474,6 +479,7 @@ fn resolve_token(config: &Config) -> Result<String> {
         access_policy: policy,
         extra_bridge_paths: vec![],
         keys_dir: None,
+        force_keyring,
     })?;
     cache::resolve_token(config, storage.as_ref())
 }
@@ -550,6 +556,7 @@ mod tests {
             biometric: false,
             no_open: false,
             clear: false,
+            keyring: false,
             command: None,
         }
     }
@@ -752,6 +759,7 @@ mod tests {
             biometric: true,
             no_open: true,
             clear: true,
+            keyring: false,
             command: None,
         };
         apply_cli_overrides(&mut config, &cli);
@@ -987,6 +995,7 @@ mod tests {
             biometric: false,
             no_open: false,
             clear: true,
+            keyring: false,
             command: None,
         })
         .expect("clear should succeed without server resolution");
@@ -1031,6 +1040,7 @@ mod tests {
             biometric: false,
             no_open: false,
             clear: true,
+            keyring: false,
             command: None,
         })
         .expect("clear should ignore malformed config");
