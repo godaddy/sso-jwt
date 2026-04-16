@@ -18,6 +18,7 @@ enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }
 enclaveapp-cache = { path = "../crates/enclaveapp-cache" }
 enclaveapp-tpm-bridge = { path = "../crates/enclaveapp-tpm-bridge" }
 enclaveapp-build-support = { path = "../crates/enclaveapp-build-support" }
+zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

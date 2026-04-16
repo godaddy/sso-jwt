@@ -14,6 +14,8 @@ mod wsl_install;
 
 #[allow(clippy::print_stderr, clippy::exit)]
 fn main() {
+    enclaveapp_core::process::harden_process();
+
     let cli = cli::Cli::parse();
     if let Err(e) = cli::run(cli) {
         eprintln!("error: {e:#}");
