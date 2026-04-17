@@ -26,7 +26,7 @@ workspace = true
 [dev-dependencies]
 mockito = "1"
 tempfile = "3"
-enclaveapp-app-storage = { workspace = true, features = ["mock"] }
+enclaveapp-app-storage = { workspace = true }
 
 [lints]
 workspace = true
