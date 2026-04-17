@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use enclaveapp_cache::envelope::{self, Unwrapped};
 use enclaveapp_cache::{read_u64_be, write_u64_be, CacheEntry, CacheFormat};
 use fs4::fs_std::FileExt;
 use std::fs::{self, OpenOptions};
@@ -38,6 +39,23 @@ pub struct CacheHeader {
     pub risk_level: u8,
     pub token_iat: u64,
     pub session_start: u64,
+}
+
+impl CacheHeader {
+    /// Serialize the header to the exact byte sequence bound into the
+    /// encrypted envelope — `[magic][version][risk_level][token_iat][session_start]`
+    /// (22 bytes). Tampering with any field after encryption is
+    /// detected on decrypt.
+    fn binding_bytes(&self) -> Vec<u8> {
+        let fmt = cache_format();
+        let mut out = Vec::with_capacity(4 + 1 + 1 + 8 + 8);
+        out.extend_from_slice(&fmt.magic);
+        out.push(fmt.version);
+        out.push(self.risk_level);
+        out.extend_from_slice(&self.token_iat.to_be_bytes());
+        out.extend_from_slice(&self.session_start.to_be_bytes());
+        out
+    }
 }
 
 fn now_secs() -> u64 {
@@ -218,7 +236,41 @@ fn maybe_migrate_cache_path(
     Ok(())
 }
 
+/// Decrypt a cache ciphertext, verify the envelope's header binding
+/// against the observed cache header, and return the plaintext token.
+///
+/// Legacy pre-envelope caches pass through the hash check verbatim
+/// (no binding) so upgrading in place is transparent.
+fn decrypt_and_unwrap(
+    cache_path: &Path,
+    storage: &dyn EncryptionStorage,
+    header: &CacheHeader,
+    ciphertext: &[u8],
+) -> Result<String> {
+    let plaintext = storage
+        .decrypt(ciphertext)
+        .context("failed to decrypt cached token")?;
+    let min_counter = envelope::read_counter(cache_path).unwrap_or(0);
+    let unwrapped = envelope::unwrap_plaintext(&header.binding_bytes(), min_counter, &plaintext)
+        .with_context(|| {
+            format!(
+                "cache envelope check failed for {}: header tampering or rollback detected",
+                cache_path.display()
+            )
+        })?;
+    let payload = match unwrapped {
+        Unwrapped::Legacy { payload } | Unwrapped::Versioned { payload, .. } => payload,
+    };
+    String::from_utf8(payload).context("cached token is not valid UTF-8")
+}
+
 /// Write a cache file with the given token.
+///
+/// The token is wrapped in an
+/// [`enclaveapp_cache::envelope`] that binds the cache header's bytes
+/// into the encrypted payload and embeds a monotonic rollback
+/// counter. The counter sidecar at `<path>.counter` is updated
+/// after a successful write.
 pub fn write_cache(
     path: &Path,
     storage: &dyn EncryptionStorage,
@@ -228,8 +280,17 @@ pub fn write_cache(
 ) -> Result<()> {
     let token_iat = jwt::extract_iat(token).unwrap_or_else(|_| now_secs());
 
+    let header = CacheHeader {
+        risk_level,
+        token_iat,
+        session_start,
+    };
+    let prior_counter = envelope::read_counter(path).unwrap_or(0);
+    let counter = envelope::next_counter(prior_counter, 0);
+    let wrapped = envelope::wrap_plaintext(&header.binding_bytes(), counter, token.as_bytes());
+
     let ciphertext = storage
-        .encrypt(token.as_bytes())
+        .encrypt(&wrapped)
         .context("failed to encrypt token")?;
 
     let mut header_data = Vec::with_capacity(HEADER_DATA_LEN);
@@ -246,6 +307,16 @@ pub fn write_cache(
     fmt.write(path, &entry, HEADER_DATA_LEN)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("failed to write cache file")?;
+
+    if let Err(e) = envelope::write_counter(path, counter) {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!(
+                "warning: failed to persist rollback-counter sidecar for {}: {e}",
+                path.display()
+            );
+        }
+    }
 
     Ok(())
 }
@@ -382,11 +453,7 @@ fn resolve_token_locked(config: &Config, storage: &dyn EncryptionStorage) -> Res
             TokenState::Fresh => {
                 // Decrypt and return
                 let ciphertext = read_ciphertext(&cache_path)?;
-                let plaintext = storage
-                    .decrypt(&ciphertext)
-                    .context("failed to decrypt cached token")?;
-                let token =
-                    String::from_utf8(plaintext).context("cached token is not valid UTF-8")?;
+                let token = decrypt_and_unwrap(&cache_path, storage, &header, &ciphertext)?;
                 maybe_migrate_cache_path(
                     config,
                     &cache_path,
@@ -401,11 +468,7 @@ fn resolve_token_locked(config: &Config, storage: &dyn EncryptionStorage) -> Res
             TokenState::RefreshWindow => {
                 // Decrypt, try refresh, fall back to cached
                 let ciphertext = read_ciphertext(&cache_path)?;
-                let plaintext = storage
-                    .decrypt(&ciphertext)
-                    .context("failed to decrypt cached token")?;
-                let token =
-                    String::from_utf8(plaintext).context("cached token is not valid UTF-8")?;
+                let token = decrypt_and_unwrap(&cache_path, storage, &header, &ciphertext)?;
 
                 // If no heartbeat URL configured, treat like Fresh (return cached)
                 if let Some(ref heartbeat_url) = config.heartbeat_url {
@@ -465,11 +528,7 @@ fn resolve_token_locked(config: &Config, storage: &dyn EncryptionStorage) -> Res
                 if let Some(ref heartbeat_url) = config.heartbeat_url {
                     // Decrypt, try refresh, fall back to full re-auth
                     let ciphertext = read_ciphertext(&cache_path)?;
-                    let plaintext = storage
-                        .decrypt(&ciphertext)
-                        .context("failed to decrypt cached token")?;
-                    let token =
-                        String::from_utf8(plaintext).context("cached token is not valid UTF-8")?;
+                    let token = decrypt_and_unwrap(&cache_path, storage, &header, &ciphertext)?;
 
                     if let Some(new_token) = oauth::heartbeat_refresh(heartbeat_url, &token) {
                         write_cache(
@@ -530,6 +589,17 @@ mod tests {
     use base64::Engine;
     use enclaveapp_app_storage::mock::MockEncryptionStorage as MockStorage;
     use std::ffi::OsString;
+
+    /// Decrypt a cache ciphertext and unwrap the envelope the way the
+    /// real `resolve_token_locked` path does. Tests that write via
+    /// `write_cache` then verify the round-tripped token go through
+    /// this helper so they stay honest about the full envelope flow.
+    fn test_decrypt_token(path: &Path, storage: &MockStorage, ciphertext: &[u8]) -> String {
+        let header = read_header(path)
+            .expect("read_header")
+            .expect("cache header present");
+        decrypt_and_unwrap(path, storage, &header, ciphertext).expect("decrypt_and_unwrap")
+    }
 
     struct TestConfigDirGuard {
         prev_xdg: Option<OsString>,
@@ -791,8 +861,7 @@ mod tests {
         write_cache(&path, &storage, &token, 2, 1700000000).unwrap();
 
         let ciphertext = read_ciphertext(&path).unwrap();
-        let plaintext = storage.decrypt(&ciphertext).unwrap();
-        let recovered = String::from_utf8(plaintext).unwrap();
+        let recovered = test_decrypt_token(&path, &storage, &ciphertext);
         assert_eq!(recovered, token);
     }
 
@@ -1123,8 +1192,7 @@ mod tests {
         write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
         let ct = read_ciphertext(&path).expect("read_ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        let recovered = test_decrypt_token(&path, &storage, &ct);
         assert_eq!(recovered, token);
     }
 
@@ -1145,8 +1213,7 @@ mod tests {
         write_cache(&path, &storage, &token, 2, 1700000000).expect("write_cache");
 
         let ct = read_ciphertext(&path).expect("read_ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        let recovered = test_decrypt_token(&path, &storage, &ct);
         assert_eq!(recovered, token);
     }
 
@@ -1182,8 +1249,7 @@ mod tests {
 
         // Verify the token itself round-trips
         let ct = read_ciphertext(&path).expect("read_ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        let recovered = test_decrypt_token(&path, &storage, &ct);
         assert_eq!(recovered, token);
     }
 
@@ -1254,8 +1320,8 @@ mod tests {
         assert_eq!(hdr_a.risk_level, 1);
         assert_eq!(hdr_a.token_iat, 1700000000);
         let ct_a = read_ciphertext(&path_a).expect("read_ciphertext A");
-        let pt_a = storage.decrypt(&ct_a).expect("decrypt A");
-        assert_eq!(String::from_utf8(pt_a).expect("utf-8 A"), token_a);
+        let recovered_a = test_decrypt_token(&path_a, &storage, &ct_a);
+        assert_eq!(recovered_a, token_a);
 
         // Read back cache B
         let hdr_b = read_header(&path_b)
@@ -1264,8 +1330,8 @@ mod tests {
         assert_eq!(hdr_b.risk_level, 3);
         assert_eq!(hdr_b.token_iat, 1700100000);
         let ct_b = read_ciphertext(&path_b).expect("read_ciphertext B");
-        let pt_b = storage.decrypt(&ct_b).expect("decrypt B");
-        assert_eq!(String::from_utf8(pt_b).expect("utf-8 B"), token_b);
+        let recovered_b = test_decrypt_token(&path_b, &storage, &ct_b);
+        assert_eq!(recovered_b, token_b);
     }
 
     // ---- Overwrite existing cache ----
@@ -1290,8 +1356,7 @@ mod tests {
         assert_eq!(header.token_iat, 1700050000);
 
         let ct = read_ciphertext(&path).expect("read_ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        let recovered = test_decrypt_token(&path, &storage, &ct);
         assert_eq!(recovered, token_new);
         assert_ne!(recovered, token_old);
     }
@@ -1698,8 +1763,7 @@ mod tests {
             .expect("read_header")
             .expect("header present");
         let ct = read_ciphertext(&primary_path).expect("read ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        let recovered = String::from_utf8(pt).expect("valid utf-8");
+        let recovered = test_decrypt_token(&primary_path, &storage, &ct);
         assert_eq!(recovered, token);
     }
 
@@ -1809,8 +1873,8 @@ mod tests {
             .expect("read_header")
             .expect("header present");
         let ct = read_ciphertext(&primary_path).expect("read ciphertext");
-        let pt = storage.decrypt(&ct).expect("decrypt");
-        assert_eq!(String::from_utf8(pt).expect("valid utf-8"), token);
+        let recovered = test_decrypt_token(&primary_path, &storage, &ct);
+        assert_eq!(recovered, token);
     }
 
     #[test]
