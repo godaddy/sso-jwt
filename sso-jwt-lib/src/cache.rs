@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use enclaveapp_cache::{read_u64_be, write_u64_be, CacheEntry, CacheFormat};
-use std::fs;
-use std::path::Path;
+use fs4::fs_std::FileExt;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
@@ -301,8 +302,67 @@ pub fn purge_deprecated_legacy_cache_files() -> Result<()> {
 /// 1. Check cache header (no decryption)
 /// 2. Classify token state
 /// 3. Return cached / refresh / re-auth as appropriate
+///
+/// Serialized across concurrent `sso-jwt get` invocations with an
+/// exclusive advisory file lock on `<cache>.lock`. Without the lock,
+/// two concurrent invocations that find the cache Dead would each
+/// enter a full OAuth Device-Code flow, show the user two separate
+/// prompts, and race the cache write. With the lock, the second caller
+/// blocks until the first completes, then re-reads the now-fresh cache
+/// and returns immediately.
 #[allow(clippy::print_stderr)]
 pub fn resolve_token(config: &Config, storage: &dyn EncryptionStorage) -> Result<String> {
+    let lock_path = resolve_lock_path(config);
+    let _guard = ResolveLock::acquire(&lock_path)?;
+    resolve_token_locked(config, storage)
+}
+
+fn resolve_lock_path(config: &Config) -> PathBuf {
+    let mut path = config.cache_file_path();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    path.set_file_name(name);
+    path
+}
+
+/// Exclusive file lock held for the duration of a single resolve. The
+/// lock file itself is empty; its only job is to advisory-lock the
+/// inode. Dropping the guard releases via `fs4`'s unlock, which is
+/// also invoked implicitly when the process exits.
+struct ResolveLock {
+    file: fs::File,
+}
+
+impl ResolveLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating lock directory {}", parent.display()))?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("opening lock file {}", path.display()))?;
+        FileExt::lock_exclusive(&file)
+            .with_context(|| format!("acquiring exclusive lock on {}", path.display()))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ResolveLock {
+    fn drop(&mut self) {
+        drop(FileExt::unlock(&self.file));
+    }
+}
+
+#[allow(clippy::print_stderr)]
+fn resolve_token_locked(config: &Config, storage: &dyn EncryptionStorage) -> Result<String> {
     let primary_cache_path = config.cache_file_path();
     let cache_path = config
         .cache_lookup_paths()
