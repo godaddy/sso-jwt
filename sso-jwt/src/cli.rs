@@ -358,7 +358,15 @@ fn fetch_from_github_via_gh(source: &GitHubSource) -> Result<Option<String>> {
         "github:{}/{}@{}/{}",
         source.owner, source.repo, source.r#ref, source.path
     );
-    let mut child = match std::process::Command::new("gh")
+    // Resolve `gh` from a trusted-directory allowlist rather than $PATH
+    // so a user-writable earlier-on-PATH shim can't substitute a
+    // lookalike binary that would see the user's ambient GitHub creds.
+    // If no trusted gh is found, fall through to the HTTPS raw-URL
+    // fetch path — no hard dependency on gh.
+    let Some(gh_path) = crate::gh_discovery::find_trusted_gh() else {
+        return Ok(None);
+    };
+    let mut child = match std::process::Command::new(&gh_path)
         .args([
             "api",
             &format!(

@@ -2,6 +2,7 @@ use clap::Parser;
 
 mod cli;
 mod exec;
+mod gh_discovery;
 mod shell_init;
 #[cfg(target_os = "windows")]
 #[allow(

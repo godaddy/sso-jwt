@@ -2123,12 +2123,14 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "enclaveapp-app-storage",
  "enclaveapp-build-support",
  "enclaveapp-core",
  "enclaveapp-wsl",
  "reqwest",
  "sso-jwt-lib",
+ "tempfile",
  "zeroize",
 ]
 
