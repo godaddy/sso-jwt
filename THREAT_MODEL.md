@@ -129,14 +129,32 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 ### T9: Cache file tampering
 
-**Threat:** An attacker modifies the `.enc` file header (risk level, timestamps) to extend token validity.
+**Threat:** An attacker modifies the `.enc` file header (risk level, timestamps) to extend token validity, or replaces the `.enc` body with an older valid ciphertext to roll back to a prior token.
 
 **Mitigation:**
-- The header is unencrypted for performance, but the ECIES ciphertext includes an AES-GCM authentication tag. Tampering with the ciphertext causes decryption failure.
-- Tampering with the header timestamps could cause sso-jwt to serve a stale token that the server would then reject. This is a denial-of-service at worst.
-- Setting a lower risk level in the header does not grant more access -- it only affects client-side caching behavior.
+- ECIES ciphertext includes an AES-GCM authentication tag — tampering
+  with the ciphertext body causes decryption failure.
+- The previously-unauthenticated header (magic, version, risk level,
+  `token_iat`, `session_start`) is now bound into the encrypted
+  envelope. `write_cache` wraps the token plaintext as
+  `[4B "APL1"][32B SHA-256(header bytes)][8B u64 counter][token]`
+  before calling `storage.encrypt` (`sso-jwt-lib/src/cache.rs`,
+  helper `crates/enclaveapp-cache/src/envelope.rs`). `decrypt_and_unwrap`
+  recomputes the header hash at read time and rejects any edit with
+  "cache envelope check failed".
+- The monotonic counter inside the envelope is persisted in a
+  `<cache>.counter` sidecar under an exclusive `fs4` flock and
+  compared on every read; older-ciphertext replay is rejected as
+  `Rollback`.
+- Legacy pre-envelope caches (no `APL1` magic) pass through
+  transparently for migration; the next write puts them into the
+  authenticated form.
 
-**Residual risk:** Header tampering can extend client-side caching but cannot create tokens. The server enforces its own expiration independently.
+**Residual risk:** An attacker who can write BOTH the `.enc` and the
+`.counter` sidecar can still replay within the remaining server-side
+validity window. Server-enforced `exp` on the JWT remains the
+ultimate authority. Risk-level downgrade alone can no longer widen
+the client-side caching window — it becomes a decrypt error.
 
 ### T10: WSL bridge compromise
 
@@ -144,11 +162,12 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 **Mitigation:**
 - The bridge path candidates are fixed install locations under `/mnt/c/Program Files/sso-jwt/` and `/mnt/c/ProgramData/sso-jwt/`; `Program Files` requires admin rights to modify on Windows.
-- The bridge is distributed alongside the main installer and should be verified via package manager signatures.
+- The `which`-based PATH fallback has been removed from `find_bridge` — a user-writable `$PATH` entry can no longer substitute a malicious bridge. Users who install to non-admin paths (scoop, manual builds) must set `ENCLAVEAPP_BRIDGE_PATH` (or `SSO_JWT_BRIDGE_PATH`) explicitly.
+- Before spawn, `require_bridge_is_authenticode_signed` parses the PE header's `IMAGE_DIRECTORY_ENTRY_SECURITY` slot and refuses binaries with no Authenticode signature block. Opt-out for dev builds via `ENCLAVEAPP_BRIDGE_ALLOW_UNSIGNED=1`.
 - Request/response size is capped and child processes are reaped on drop (see `enclaveapp-bridge`'s `MAX_BRIDGE_RESPONSE_BYTES` + `BridgeSession::Drop`).
 - `sso-jwt-tpm-bridge/src/main.rs` is a thin wrapper around `enclaveapp_tpm_bridge::BridgeServer`; protocol handling lives in `libenclaveapp` and inherits its hardening.
 
-**Residual risk:** The WSL-side `find_bridge` falls back to `which` on `$PATH` when the fixed locations are empty, so a user-writable path entry can substitute a malicious binary. No Authenticode / `WinVerifyTrust` check is performed on the resolved bridge — documenting this as a known gap tracked under the libenclaveapp bridge PE-validation follow-up. An attacker with admin rights on the Windows host already controls the TPM regardless.
+**Residual risk:** Authenticode-presence-only — we do not chase the certificate chain to a Microsoft / Developer ID root, which would require `WinVerifyTrust` on the Windows host side. A Windows-admin attacker who replaces the bridge with a validly-signed-but-malicious binary would still be served; admin on Windows already implies control of the TPM regardless.
 
 ### T11: Linux software keyring weakness
 
@@ -204,13 +223,14 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 ### T16: Cache rollback
 
-**Threat:** An attacker with user-level write access replaces the current `<name>.enc` cache file with an older valid ciphertext they previously exfiltrated. The old header may carry a `session_start`/`token_iat` that puts the token back inside the Fresh or RefreshWindow state, so sso-jwt serves it without re-auth.
+**Threat:** An attacker with user-level write access replaces the current `<name>.enc` cache file with an older valid ciphertext they previously exfiltrated. The old header may carry a `session_start`/`token_iat` that puts the token back inside the Fresh or RefreshWindow state, so sso-jwt would serve it without re-auth.
 
 **Mitigation:**
 - Rollback is bounded by `session_timeout_secs` — once exceeded, even a "fresh"-looking cache expires and forces re-auth.
 - The server ultimately enforces the JWT's own `exp`; a rolled-back token the SSO server rejects becomes a denial-of-service, not a credential grant.
+- `write_cache` embeds a monotonic 8-byte counter inside the encrypted envelope and persists it in a `<cache>.counter` sidecar under an `fs4` flock. On every decrypt (`decrypt_and_unwrap` in `sso-jwt-lib/src/cache.rs`), the embedded counter must be `>= sidecar`; older ciphertexts are rejected with `Rollback { observed, expected_at_least }`. See `crates/enclaveapp-cache/src/envelope.rs`.
 
-**Residual risk:** Within the session-timeout window, rollback extends client-side cache hits by the difference between the old and new state. No monotonic counter or signed anti-rollback token is implemented. Operators who need stronger guarantees should run at higher risk levels (shorter windows).
+**Residual risk:** An attacker who rolls back BOTH the `.enc` and the `.counter` sidecar simultaneously (or the whole filesystem snapshot) can still replay within the embedded counter's prior window. The sidecar is same-UID writable by design — same threshold as any other local state in the cache dir. Operators who need stronger guarantees should run at higher risk levels (shorter server-enforced windows).
 
 ### T17: Local clock manipulation
 
@@ -278,7 +298,7 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 | Local clock | Privilege to set clock | Serve expired token | Server-side `exp` check (T17) |
 | `gh` / `$BROWSER` PATH lookup | PATH hijack | Config payload injection or arbitrary exec | HTTPS validation, shell_words parse (T19/T21) |
 | SSO webservice | Network access | Token issuance | Okta MFA, device code TTL |
-| TPM bridge replacement (WSL) | Admin on Windows host or PATH hijack | Key compromise | Fixed install path; PE validation is a known gap |
+| TPM bridge replacement (WSL) | Admin on Windows host | Key compromise | Fixed install path; Authenticode-signature-presence check before spawn (T10) |
 | Login keyring (Linux) | User session | Token extraction | Documented limitation |
 | NAPI string return | Node process memory | Memory residue | None at Node layer (T22) |
 
