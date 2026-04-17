@@ -11,4 +11,3 @@ jobs:
     with:
       platforms: '["macos-latest", "ubuntu-latest", "windows-latest"]'
       linux_deps: "libdbus-1-dev pkg-config libtss2-dev"
-      test_args: "-- --test-threads=1"
