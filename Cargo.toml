@@ -8,16 +8,15 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-enclaveapp-core = { path = "../crates/enclaveapp-core" }
-enclaveapp-apple = { path = "../crates/enclaveapp-apple" }
-enclaveapp-windows = { path = "../crates/enclaveapp-windows" }
-enclaveapp-bridge = { path = "../crates/enclaveapp-bridge" }
-enclaveapp-software = { path = "../crates/enclaveapp-software", features = ["encryption", "keyring-storage"] }
-enclaveapp-wsl = { path = "../crates/enclaveapp-wsl" }
-enclaveapp-app-storage = { path = "../crates/enclaveapp-app-storage" }
-enclaveapp-cache = { path = "../crates/enclaveapp-cache" }
-enclaveapp-tpm-bridge = { path = "../crates/enclaveapp-tpm-bridge" }
-enclaveapp-build-support = { path = "../crates/enclaveapp-build-support" }
+enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
+enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple" }
+enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows" }
+enclaveapp-bridge = { path = "../libenclaveapp/crates/enclaveapp-bridge" }
+enclaveapp-wsl = { path = "../libenclaveapp/crates/enclaveapp-wsl" }
+enclaveapp-app-storage = { path = "../libenclaveapp/crates/enclaveapp-app-storage" }
+enclaveapp-cache = { path = "../libenclaveapp/crates/enclaveapp-cache" }
+enclaveapp-tpm-bridge = { path = "../libenclaveapp/crates/enclaveapp-tpm-bridge" }
+enclaveapp-build-support = { path = "../libenclaveapp/crates/enclaveapp-build-support" }
 zeroize = "1"
 
 [workspace.lints.rust]
