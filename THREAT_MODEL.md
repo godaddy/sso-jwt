@@ -232,19 +232,19 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 ### T19: Malicious `gh` on PATH during `add-server --from-github`
 
-**Threat:** `std::process::Command::new("gh")` (`sso-jwt/src/cli.rs:361`) resolves `gh` via `$PATH`. A shim `gh` earlier on `$PATH` intercepts the fetch, reads the user's ambient GitHub credentials, and can return a crafted response.
+**Threat:** Historically `std::process::Command::new("gh")` resolved `gh` via `$PATH`. A shim `gh` earlier on `$PATH` could intercept the fetch, read the user's ambient GitHub credentials, and return a crafted response.
 
-**Mitigation:** `gh` is invoked with `stdin(Stdio::null())`, `GH_PROMPT_DISABLED=1`, argument passing (no `sh -c`), and a 30-second reader-thread timeout (`sso-jwt/src/cli.rs`). The fetched payload flows through the T14 HTTPS-only validation before a profile is installed.
+**Mitigation:** `gh` is now resolved via `sso-jwt/src/gh_discovery.rs::find_trusted_gh`, which searches a fixed allowlist of package-manager install dirs (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `~/.cargo/bin` on Unix; `%LOCALAPPDATA%\Programs\gh\bin` and `%ProgramFiles%\GitHub CLI` on Windows) plus the current executable's own dir, canonicalizes the candidate, and verifies it is an executable regular file. PATH-inserted shims are ignored. The bridge also invokes `gh` with `stdin(Stdio::null())`, `GH_PROMPT_DISABLED=1`, argument passing (no `sh -c`), and a 30-second reader-thread timeout. The fetched payload flows through the T14 HTTPS-only validation before a profile is installed.
 
-**Residual risk:** PATH hijacking is a user-side compromise that defeats many defenses at once. The specific impact for sso-jwt is limited to fetching a *config profile*, which then enters the T14/T15 domain. Unlike sshenc, sso-jwt does not use `enclaveapp-core::bin_discovery` for `gh`; switching to trusted discovery is a candidate hardening.
+**Residual risk:** If no trusted `gh` is found, `fetch_from_github_via_gh` returns `Ok(None)` and the caller falls through to the HTTPS raw-URL fetch — no hard dependency on `gh`. A user who deliberately installs `gh` into a non-standard location must symlink it into a trusted dir or the `--from-github` shortcut won't work.
 
 ### T20: Concurrent `sso-jwt get` race
 
 **Threat:** Two concurrent `sso-jwt get` invocations both find the cache Dead and enter the full OAuth Device Code flow. The user sees two user-code prompts, authorizes one, and the races both write to the cache; the last `rename` wins atomically but a race window for the second prompt exists.
 
-**Mitigation:** `atomic_write` (rename) makes the cache update atomic, so the outcome is always a valid cache, never a partial write. No flock is taken around `resolve_token`.
+**Mitigation:** `resolve_token` is serialized per-cache-file via an exclusive `fs4` `flock` on `<cache>.lock` (`sso-jwt-lib/src/cache.rs::ResolveLock`). Concurrent invocations for the same server/environment queue behind the lock, so only one Device Code flow runs at a time. `atomic_write` (rename) additionally ensures the cache update itself is atomic.
 
-**Residual risk:** UX annoyance rather than a security issue. If needed, a file lock around the resolve path would serialize concurrent invocations.
+**Residual risk:** The lock is taken on a sibling `.lock` file. A concurrent *removal* of the lock file during a race is possible but benign (the next call recreates it). Cross-host races (e.g. NFS home dir) fall back to advisory behavior — documented as unsupported.
 
 ### T21: Browser launch (`$BROWSER` env and `open`/`xdg-open`/`start`)
 

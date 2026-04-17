@@ -191,7 +191,10 @@ token. Invalid risk levels (0, >3) are normalized to 2 (medium).
 
 ## Token Resolution Flow
 
-`cache::resolve_token(config, storage)`:
+`cache::resolve_token(config, storage)` is wrapped by `ResolveLock`, an
+exclusive `fs4` `flock` on a sibling `<cache>.lock` file. Concurrent `sso-jwt
+get` invocations for the same server/environment queue behind the lock so only
+one Device Code prompt surfaces at a time. See THREAT_MODEL.md T20.
 
 1. Find the first existing cache file from `cache_lookup_paths()` (primary,
    then legacy).
@@ -313,6 +316,16 @@ Fetches server config TOML from a remote source. Two fetch strategies:
 2. **`gh api`**: GitHub CLI with `GH_PROMPT_DISABLED=1`, `stdin(null)`,
    and timeout enforcement
 
+The `gh` binary is *not* resolved via `$PATH`. `gh_discovery::find_trusted_gh`
+searches a fixed allowlist of package-manager install dirs
+(`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `~/.local/bin`,
+`~/.cargo/bin` on Unix; `%LOCALAPPDATA%\Programs\gh\bin` and
+`%ProgramFiles%\GitHub CLI` on Windows), plus the current executable's own
+directory. Each candidate is `canonicalize()`d and verified to be an
+executable regular file before being used. If no trusted `gh` is found, the
+helper returns `Ok(None)` and the caller falls through to the raw-URL HTTPS
+fetch. See THREAT_MODEL.md T19.
+
 Constraints:
 - GitHub source requires a pinned ref (`owner/repo@ref/path`), no HEAD resolution
 - Cleartext HTTP URLs are rejected
@@ -418,7 +431,7 @@ StorageConfig {
 
 ## Build Requirements
 
-- Rust 1.82+
+- Rust stable (pinned via `rust-toolchain.toml`, edition 2021)
 - macOS: Xcode (for swiftc via libenclaveapp)
 - Linux: `libdbus-1-dev`, `pkg-config`
 - Windows: Visual Studio Build Tools
