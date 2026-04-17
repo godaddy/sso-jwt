@@ -339,9 +339,8 @@ struct ResolveLock {
 impl ResolveLock {
     fn acquire(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("creating lock directory {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating lock directory {}", parent.display()))?;
         }
         let file = OpenOptions::new()
             .read(true)
