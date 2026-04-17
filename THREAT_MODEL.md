@@ -113,7 +113,7 @@
 
 ### T8: Stale token / infinite refresh chain
 
-**Threat:** Proactive heartbeat refresh keeps a session alive indefinitely, creating unbounded credential exposure.
+**Threat:** Reactive refresh-window heartbeat keeps a session alive indefinitely, creating unbounded credential exposure. (Refresh is reactive within `RefreshWindow`/`Grace`, not a background daemon.)
 
 **Mitigation:** Absolute session timeout prevents indefinite refresh:
 
@@ -140,14 +140,15 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 ### T10: WSL bridge compromise
 
-**Threat:** An attacker replaces `sso-jwt-tpm-bridge.exe` with a malicious binary.
+**Threat:** An attacker replaces `sso-jwt-tpm-bridge.exe` with a malicious binary, or positions a lookalike earlier on `$PATH` so the WSL-side client spawns it instead of the real bridge.
 
 **Mitigation:**
-- The bridge path is fixed at installation time (`/mnt/c/Program Files/sso-jwt/sso-jwt-tpm-bridge.exe`).
-- `Program Files` requires admin rights to modify on Windows.
+- The bridge path candidates are fixed install locations under `/mnt/c/Program Files/sso-jwt/` and `/mnt/c/ProgramData/sso-jwt/`; `Program Files` requires admin rights to modify on Windows.
 - The bridge is distributed alongside the main installer and should be verified via package manager signatures.
+- Request/response size is capped and child processes are reaped on drop (see `enclaveapp-bridge`'s `MAX_BRIDGE_RESPONSE_BYTES` + `BridgeSession::Drop`).
+- `sso-jwt-tpm-bridge/src/main.rs` is a thin wrapper around `enclaveapp_tpm_bridge::BridgeServer`; protocol handling lives in `libenclaveapp` and inherits its hardening.
 
-**Residual risk:** An attacker with admin rights on the Windows host could replace the bridge binary. But an attacker with admin rights already controls the TPM.
+**Residual risk:** The WSL-side `find_bridge` falls back to `which` on `$PATH` when the fixed locations are empty, so a user-writable path entry can substitute a malicious binary. No Authenticode / `WinVerifyTrust` check is performed on the resolved bridge — documenting this as a known gap tracked under the libenclaveapp bridge PE-validation follow-up. An attacker with admin rights on the Windows host already controls the TPM regardless.
 
 ### T11: Linux software keyring weakness
 
@@ -160,18 +161,126 @@ The `session_start` timestamp is set when a full Device Code authentication occu
 
 **Residual risk:** Any process running as the user can access the keyring. This is a known limitation of desktop Linux security.
 
+### T12: Post-handoff credential misuse (Type 4 core residual)
+
+**Threat:** After `sso-jwt get` writes the JWT to stdout or `sso-jwt exec` injects it into a child process's environment, sso-jwt has no further control. A consumer that logs the JWT (observability agent, `set -x`, error reporter), persists it to shell history, or forwards it to a subprocess leaks the token. This is the defining Type 4 (CredentialSource) constraint.
+
+**Mitigation:**
+- `sso-jwt exec -- <cmd>` is preferred over capturing stdout, because it avoids exposing the JWT to the surrounding shell and avoids the `export` footgun (T3).
+- Tokens are short-lived relative to session timeout; rotation limits blast radius.
+- Documentation steers consumers toward env-var interpolation rather than logging the token.
+
+**Residual risk:** Accepted. Once the JWT crosses the handoff boundary, the consumer is inside sso-jwt's trusted computing base. Operators MUST treat consuming tools as credential-handling code.
+
+### T13: Cache path traversal / aliasing
+
+**Threat:** Server name, environment name, or cache-name overrides flow into filesystem paths. An attacker-influenced value such as `../../../etc/passwd` or `foo/../bar` could traverse out of the cache directory or alias two logically-distinct caches to the same file.
+
+**Mitigation:** `Config::encode_cache_component` (`sso-jwt-lib/src/config.rs:58-84`) applies a reversible `~XX` hex encoding so only `[A-Za-z0-9_-]` characters appear verbatim. Every other byte, including path separators and `..`, encodes to an unambiguous `~HH` sequence. The encoding is byte-by-byte (O(n)) and not regex-based, so ReDoS is not possible.
+
+**Residual risk:** None for path escape. Two servers whose names collide after encoding would still alias, but the encoding is injective on valid UTF-8 server names.
+
+### T14: Configuration-fetch integrity (`add-server --from-url`, `--from-github`)
+
+**Threat:** An attacker serves a malicious server profile via a captured URL or a force-moved git tag. Installed, the profile redirects subsequent `sso-jwt` invocations to an attacker-controlled OAuth endpoint.
+
+**Mitigation:**
+- `validate_endpoint_url` (`sso-jwt-lib/src/config.rs:100-107`) rejects `http://` for all OAuth, token, and heartbeat URLs. `add-server --from-url` rejects cleartext at ingest (`sso-jwt/src/cli.rs:247`).
+- `add-server --from-github` requires a pinned `owner/repo@ref/path` form (`sso-jwt/src/cli.rs:433-437`); there is no implicit `HEAD` fallback.
+- A 30-second HTTP timeout and 64 KB response cap bound a malicious server's ability to stall or exhaust memory.
+
+**Residual risk:** A git tag pinning is tamper-evident only if the operator pins a **commit SHA**, not a mutable tag — force-moved tags remain TOCTOU-exposed. Operators should prefer SHA pinning for high-trust configs.
+
+### T15: Local configuration file tamper
+
+**Threat:** A same-UID attacker edits `~/.config/sso-jwt/config.toml` to change `oauth_url` / `token_url` / `heartbeat_url` to attacker-controlled servers that pass the HTTPS check. On next `sso-jwt get`, the user's `client_id` and device-flow response are sent to the attacker, who can proxy to the real Okta and capture the issued JWT — or issue their own.
+
+**Mitigation:**
+- Config files are written with 0600 permissions via `atomic_write` (`sso-jwt-lib/src/config.rs:421-429`).
+- HTTPS-only enforcement (T14) limits the attacker to hostnames with a valid TLS certificate.
+- No file integrity check, no signed config, no warning on mtime change.
+
+**Residual risk:** Same-UID attacker has write access, which by itself is game-over for most secrets. Documented as a general trust assumption: `~/.config/sso-jwt/` must be protected by OS-level file permissions and user-side hygiene.
+
+### T16: Cache rollback
+
+**Threat:** An attacker with user-level write access replaces the current `<name>.enc` cache file with an older valid ciphertext they previously exfiltrated. The old header may carry a `session_start`/`token_iat` that puts the token back inside the Fresh or RefreshWindow state, so sso-jwt serves it without re-auth.
+
+**Mitigation:**
+- Rollback is bounded by `session_timeout_secs` — once exceeded, even a "fresh"-looking cache expires and forces re-auth.
+- The server ultimately enforces the JWT's own `exp`; a rolled-back token the SSO server rejects becomes a denial-of-service, not a credential grant.
+
+**Residual risk:** Within the session-timeout window, rollback extends client-side cache hits by the difference between the old and new state. No monotonic counter or signed anti-rollback token is implemented. Operators who need stronger guarantees should run at higher risk levels (shorter windows).
+
+### T17: Local clock manipulation
+
+**Threat:** An attacker rolls the local clock backward. sso-jwt's classifier (`sso-jwt-lib/src/cache.rs`) sees a token it believes is Fresh and serves it even if the JWT has actually expired according to real time.
+
+**Mitigation:**
+- The server side enforces the JWT's `exp` against its own clock; a rolled-back local clock does not extend server acceptance.
+- Rolling the clock forward causes sso-jwt to treat tokens as expired and re-authenticate — low harm.
+
+**Residual risk:** Accepted. An attacker with privileges to set the system clock already has substantial control.
+
+### T18: Malicious heartbeat endpoint issues attacker-controlled tokens
+
+**Threat:** The heartbeat refresh (`oauth::heartbeat_refresh`, `sso-jwt-lib/src/oauth.rs:215-248`) POSTs the current token to `heartbeat_url` and caches whatever token comes back. A compromised heartbeat URL (via T15 config tamper, or a hijacked SSO backend) can issue attacker-chosen JWTs that sso-jwt will cache and hand to consumers.
+
+**Mitigation:** `heartbeat_url` shares the HTTPS-only validation and trust anchor as `oauth_url`. Config-tamper protection (T15) is the primary defense.
+
+**Residual risk:** The refreshed JWT is not signature-verified client-side — sso-jwt treats the SSO backend as authoritative. If the backend (or the heartbeat endpoint specifically) issues malicious tokens, sso-jwt propagates them. Out of scope for the client; the backend must protect its signing key.
+
+### T19: Malicious `gh` on PATH during `add-server --from-github`
+
+**Threat:** `std::process::Command::new("gh")` (`sso-jwt/src/cli.rs:361`) resolves `gh` via `$PATH`. A shim `gh` earlier on `$PATH` intercepts the fetch, reads the user's ambient GitHub credentials, and can return a crafted response.
+
+**Mitigation:** `gh` is invoked with `stdin(Stdio::null())`, `GH_PROMPT_DISABLED=1`, argument passing (no `sh -c`), and a 30-second reader-thread timeout (`sso-jwt/src/cli.rs`). The fetched payload flows through the T14 HTTPS-only validation before a profile is installed.
+
+**Residual risk:** PATH hijacking is a user-side compromise that defeats many defenses at once. The specific impact for sso-jwt is limited to fetching a *config profile*, which then enters the T14/T15 domain. Unlike sshenc, sso-jwt does not use `enclaveapp-core::bin_discovery` for `gh`; switching to trusted discovery is a candidate hardening.
+
+### T20: Concurrent `sso-jwt get` race
+
+**Threat:** Two concurrent `sso-jwt get` invocations both find the cache Dead and enter the full OAuth Device Code flow. The user sees two user-code prompts, authorizes one, and the races both write to the cache; the last `rename` wins atomically but a race window for the second prompt exists.
+
+**Mitigation:** `atomic_write` (rename) makes the cache update atomic, so the outcome is always a valid cache, never a partial write. No flock is taken around `resolve_token`.
+
+**Residual risk:** UX annoyance rather than a security issue. If needed, a file lock around the resolve path would serialize concurrent invocations.
+
+### T21: Browser launch (`$BROWSER` env and `open`/`xdg-open`/`start`)
+
+**Threat:** During the Device Code flow, sso-jwt opens the verification URI in the user's browser. If `$BROWSER` is attacker-controlled (malicious shell profile, supply-chain dotfile), an arbitrary binary runs with the user's environment.
+
+**Mitigation:**
+- `$BROWSER` is parsed via `shell_words` (not `sh -c`), so the user's configured command cannot execute injected shell metacharacters.
+- The fallback `open`/`xdg-open`/`start` chain is the OS-supplied launcher.
+
+**Residual risk:** An attacker who controls `$BROWSER` in the user's shell already has code execution at the user level. Documented as a user-side trust assumption.
+
+### T22: Node.js NAPI boundary memory hygiene
+
+**Threat:** `sso-jwt-napi` returns the JWT as a JavaScript `String`. Node strings are immutable; there is no way to zeroize them after use. Any downstream GC sweep leaves JWT bytes in V8 heap memory until reuse.
+
+**Mitigation:** None at the Node layer. The Rust side continues to zeroize its own plaintext buffers on drop.
+
+**Residual risk:** Accepted. Node consumers that require memory hygiene should switch to the CLI `exec` subcommand. Documented as a Node-specific caveat.
+
 ## Attack Surfaces
 
 | Surface | Access Required | Impact | Mitigated By |
 |---|---|---|---|
 | Cache file read | User file read | Token theft | ECIES encryption (SE/TPM) |
 | Cache file copy to another machine | File exfiltration | Token replay | Hardware-bound key |
+| Cache file rollback | User file write | Session extension | Session timeout, server `exp` (T16) |
 | Shell history / env var | Shell access | Token leak | Export detection, exec mode |
 | Process memory | Root / ptrace | Token extraction | Zeroize on drop, biometric |
 | Network traffic | MitM position | Token interception | TLS (rustls + webpki-roots) |
+| Config file tamper | User file write | OAuth redirect | HTTPS-only validation (T15) |
+| Local clock | Privilege to set clock | Serve expired token | Server-side `exp` check (T17) |
+| `gh` / `$BROWSER` PATH lookup | PATH hijack | Config payload injection or arbitrary exec | HTTPS validation, shell_words parse (T19/T21) |
 | SSO webservice | Network access | Token issuance | Okta MFA, device code TTL |
-| TPM bridge replacement (WSL) | Admin on Windows host | Key compromise | Fixed path in Program Files |
+| TPM bridge replacement (WSL) | Admin on Windows host or PATH hijack | Key compromise | Fixed install path; PE validation is a known gap |
 | Login keyring (Linux) | User session | Token extraction | Documented limitation |
+| NAPI string return | Node process memory | Memory residue | None at Node layer (T22) |
 
 ## Assumptions
 

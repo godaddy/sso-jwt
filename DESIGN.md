@@ -324,57 +324,17 @@ Constraints:
 
 ## TPM Bridge Protocol
 
-`sso-jwt-tpm-bridge` is a Windows-only binary. It accepts JSON-RPC commands
-on stdin (one JSON object per line) and returns results on stdout.
+`sso-jwt-tpm-bridge` is a Windows-only binary. Its `main.rs` is a thin wrapper
+that delegates to `enclaveapp_tpm_bridge::BridgeServer` in libenclaveapp. The
+full JSON-RPC protocol — methods (`init`/`encrypt`/`decrypt`/`destroy`/`delete`),
+request/response shape, `access_policy` handling, and `ensure_key()` policy
+enforcement — lives in that upstream crate. See
+[`crates/enclaveapp-tpm-bridge`](https://github.com/godaddy/libenclaveapp/tree/main/crates/enclaveapp-tpm-bridge)
+for the canonical spec.
 
-### Request Format
-
-```json
-{
-  "method": "init|encrypt|decrypt|destroy|delete",
-  "params": {
-    "data": "<base64>",
-    "access_policy": "none|biometric_only",
-    "app_name": "sso-jwt",
-    "key_label": "cache-key"
-  }
-}
-```
-
-The `params` field and all its sub-fields default to empty/none when omitted
-(backward compatibility with older clients). `app_name` defaults to `"sso-jwt"`
-and `key_label` defaults to `"cache-key"` when empty.
-
-### Methods
-
-| Method | Requires init | Description |
-|---|---|---|
-| `init` | No | Initialize TPM storage. Runs `ensure_key()` to validate/regenerate the key. |
-| `encrypt` | Yes | Encrypt base64-encoded plaintext, return base64-encoded ciphertext. |
-| `decrypt` | Yes | Decrypt base64-encoded ciphertext, return base64-encoded plaintext. |
-| `destroy` / `delete` | No | Delete the TPM key and clear in-memory state. |
-
-### Key Policy Enforcement
-
-`ensure_key()` validates that an existing key's `AccessPolicy` matches what
-was requested:
-
-1. If the key exists and metadata confirms the policy matches: keep the key.
-2. If the key exists but metadata is missing or the policy differs: delete the
-   key and regenerate with the requested policy.
-3. If no key exists: generate a new one.
-
-Policy metadata is stored in a `.meta` sidecar file alongside the key.
-
-### Response Format
-
-```json
-{"result": "<base64 or status string>"}
-```
-or
-```json
-{"error": "description"}
-```
+Policy metadata is stored in a `.meta` sidecar file alongside the key. When
+the sidecar is present and matches the requested `AccessPolicy`, the existing
+key is reused; when absent or mismatched, the key is deleted and regenerated.
 
 ---
 
