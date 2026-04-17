@@ -18,9 +18,10 @@ Enclave, TPM 2.0, or software keys with keyring encryption).
 | `sso-jwt-napi` | cdylib | Node.js native addon via napi-rs |
 | `sso-jwt-tpm-bridge` | Binary | Windows TPM 2.0 bridge for WSL (JSON-RPC over stdin/stdout) |
 
-External dependency: the `libenclaveapp` workspace at `../crates/` provides
-`enclaveapp-core`, `enclaveapp-apple`, `enclaveapp-windows`, `enclaveapp-bridge`,
-`enclaveapp-software`, `enclaveapp-wsl`, and `enclaveapp-app-storage`.
+External dependency: the `libenclaveapp` workspace at
+`../libenclaveapp/crates/` provides `enclaveapp-core`, `enclaveapp-apple`,
+`enclaveapp-windows`, `enclaveapp-bridge`, `enclaveapp-keyring`,
+`enclaveapp-wsl`, `enclaveapp-app-storage`, and `enclaveapp-cache`.
 
 ---
 
@@ -99,11 +100,31 @@ Offset  Size  Field
 6       8     token_iat: big-endian u64, Unix seconds
 14      8     session_start: big-endian u64, Unix seconds
 22      4     ciphertext_len: big-endian u32
-26      N     Ciphertext (N = ciphertext_len bytes, encrypted JWT)
+26      N     Ciphertext (N = ciphertext_len bytes, ECIES blob wrapping the APL1 envelope)
 ```
 
 Total header size: 26 bytes. Ciphertext is the JWT encrypted via the platform's
 `EncryptionStorage` implementation.
+
+Before the JWT reaches `EncryptionStorage::encrypt`, `sso-jwt-lib::cache` wraps it
+in the shared **authenticated envelope** from `enclaveapp-cache::envelope`:
+
+```
+[4B "APL1"][32B SHA-256(cache header bytes)][8B BE u64 monotonic counter][JWT bytes]
+```
+
+The SHA-256 covers the unencrypted cache header (magic through `session_start`),
+so any post-encryption header edit is detected on decrypt and refused — the ECIES
+tag still validates the blob, but `decrypt_and_unwrap` rejects the envelope
+before yielding the JWT.
+
+The 8-byte counter is bumped on every successful `write_cache` and persisted in
+a sibling `<cache>.counter` sidecar guarded by an `fs4` exclusive flock. On
+read the embedded counter must be `>= sidecar`; replaying an older valid
+ciphertext is rejected as `Rollback { observed, expected_at_least }`.
+
+Pre-envelope caches (no `APL1` magic) decrypt transparently with `counter = 0`
+for migration; the next successful write upgrades them to the new format.
 
 ---
 
