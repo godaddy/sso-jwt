@@ -24,6 +24,9 @@ fn se_encrypt_decrypt_roundtrip() {
         extra_bridge_paths: vec![],
         keys_dir: None,
         force_keyring: false,
+        wrapping_key_user_presence: false,
+        wrapping_key_cache_ttl: std::time::Duration::ZERO,
+        keychain_access_group: None,
     })
     .expect("failed to create storage");
 
