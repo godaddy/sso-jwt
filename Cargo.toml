@@ -8,6 +8,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 enclaveapp-core = { path = "../libenclaveapp/crates/enclaveapp-core" }
 enclaveapp-apple = { path = "../libenclaveapp/crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "../libenclaveapp/crates/enclaveapp-windows" }
