@@ -26,9 +26,9 @@ if command -v sso-jwt >/dev/null 2>&1; then
     eval "$(sso-jwt shell-init)"
 fi"#
         .to_string(),
-        install_bridge_deps: false,
         linux_binary_path: Some(linux_binary),
         linux_binary_target: Some(".local/bin/sso-jwt".to_string()),
+        auto_install_linux_release: None,
     })
 }
 
